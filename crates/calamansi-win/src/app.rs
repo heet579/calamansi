@@ -708,14 +708,7 @@ impl App {
             count: files.len(),
             cancel: cancel.clone(),
         });
-        self.show_pill(
-            PillKind::Working,
-            &working_title(action, 0, files.len()),
-            "Click to cancel",
-            Some(0.0),
-            Vec::new(),
-        );
-
+        let title = working_title(action, 0, files.len());
         let main = self.main as isize;
         let settings = self.settings.clone();
         // Helpers were found at startup / when the menu opened; reuse them.
@@ -759,6 +752,16 @@ impl App {
                     }
                 }
             });
+        // Show progress only once the job is safely running.
+        if spawned.is_ok() {
+            self.show_pill(
+                PillKind::Working,
+                &title,
+                "Click to cancel",
+                Some(0.0),
+                Vec::new(),
+            );
+        }
         if let Err(e) = spawned {
             util::log(&format!("couldn't start the job thread: {e}"));
             self.job = None;

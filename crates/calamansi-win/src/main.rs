@@ -27,6 +27,9 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
 use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    SetUnhandledExceptionFilter, EXCEPTION_POINTERS,
+};
 use windows_sys::Win32::System::Ole::{OleInitialize, OleUninitialize};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::HiDpi::{
@@ -103,6 +106,21 @@ fn forward_to_running_instance(args: &Args) -> bool {
     }
 }
 
+unsafe extern "system" fn log_crash(info: *const EXCEPTION_POINTERS) -> i32 {
+    let (code, addr) = if info.is_null() || (*info).ExceptionRecord.is_null() {
+        (0, 0)
+    } else {
+        let r = &*(*info).ExceptionRecord;
+        (r.ExceptionCode as u32, r.ExceptionAddress as usize)
+    };
+    let base = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(null()) as usize;
+    util::log(&format!(
+        "CRASH: exception 0x{code:08x} at 0x{addr:x} (Calamansi.exe+0x{:x})",
+        addr.wrapping_sub(base)
+    ));
+    0 // EXCEPTION_CONTINUE_SEARCH: let Windows end the process as usual
+}
+
 fn main() {
     let args = parse_args();
     if forward_to_running_instance(&args) {
@@ -118,6 +136,9 @@ fn main() {
     }
     let first_run = Settings::default_path().is_some_and(|p| !p.exists());
     std::panic::set_hook(Box::new(|info| util::log(&format!("panic: {info}"))));
+    // Log native crashes (access violations and the like) before Windows
+    // ends the process, so they show up in the log instead of vanishing.
+    unsafe { SetUnhandledExceptionFilter(Some(log_crash)) };
 
     if let Err(e) = app::start(first_run, args.pick) {
         util::log(&format!("startup failed: {e}"));

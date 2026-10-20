@@ -95,6 +95,11 @@ pub fn present(hwnd: HWND, content: Content, pos: (i32, i32)) -> bool {
 }
 
 unsafe fn draw_text(dc: HDC, t: &Text) {
+    // An empty Rust string has a dangling (non-null) pointer; DrawTextW may
+    // read it even with a zero length, so never pass one.
+    if t.text.is_empty() {
+        return;
+    }
     let face = wide("Segoe UI");
     let font = CreateFontW(
         -t.size_px,
