@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["crates/calamansi-core", "crates/calamansi-cli", "crates/calamansi-win"]
-default-members = ["crates/calamansi-core", "crates/calamansi-cli"]
 
 [workspace.package]
 version = "0.1.0"

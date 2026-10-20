@@ -66,7 +66,8 @@ cargo build --release
 .\target\release\Calamansi.exe
 ```
 
-The engine and CLI also build and test on Linux and macOS (`cargo test -p calamansi-core -p calamansi-cli`),
+The engine and CLI also build and test on Linux and macOS (`cargo test -p calamansi-core -p calamansi-cli`;
+a plain `cargo build` there fails because the Windows app only links on Windows),
 and the Windows app type-checks there (`cargo clippy -p calamansi-win`).
 
 ## Settings
