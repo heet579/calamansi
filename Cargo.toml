@@ -6,7 +6,7 @@ members = ["crates/calamansi-core", "crates/calamansi-cli", "crates/calamansi-wi
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
-repository = "https://github.com/heetpatel/calamansi"
+repository = "https://github.com/heet579/calamansi"
 authors = ["Heet Patel and Calamansi contributors"]
 rust-version = "1.92"
 

@@ -69,19 +69,18 @@ you downloaded the zip from this repository's Releases page and its SHA-256 matc
 ## Publishing a release (maintainers)
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+powershell -ExecutionPolicy Bypass -File scripts\release.ps1 v0.1.0
 ```
 
-GitHub Actions tests the code, builds the self-contained executables and attaches the zip to a new
-release about ten minutes later.
+This builds the self-contained executables, packages the zip with `START HERE.txt` and SHA-256
+checksums, pushes the tag and publishes the GitHub release (needs `gh auth login` once).
 
 ## Build from source
 
 Requirements: Windows 10 1703+ or Windows 11, [Rust](https://rustup.rs) (stable, MSVC toolchain).
 
 ```powershell
-git clone https://github.com/YOUR-USERNAME/calamansi
+git clone https://github.com/heet579/calamansi
 cd calamansi
 cargo test --workspace
 cargo build --release

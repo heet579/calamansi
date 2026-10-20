@@ -6,7 +6,7 @@ A maintainer's to-do list for taking Calamansi public. Tick items off as you go.
 - [ ] Decide the final name. "Calamansi" is a working name: search GitHub, the Microsoft Store and
       winget for clashes. If you rename, update `Cargo.toml`, `README.md`, window class names in
       `app.rs` and the mutex name in `main.rs`.
-- [ ] Replace `YOUR-USERNAME` in `README.md` and the `repository` URL in `Cargo.toml`.
+- [x] Repository URL set to github.com/heet579/calamansi.
 - [ ] Optional: tell the Open Tangerine maintainers (Sintax Error) about the project. Calamansi shares
       no code with Open Tangerine, but they may want to cross-link or collaborate.
 
