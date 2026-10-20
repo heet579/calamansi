@@ -694,6 +694,14 @@ impl App {
             return;
         }
         self.reload_settings();
+        util::log(&format!(
+            "job start: {action:?} on {} file(s), first: {}",
+            files.len(),
+            files
+                .first()
+                .map(|f| f.display().to_string())
+                .unwrap_or_default()
+        ));
         let cancel = Arc::new(AtomicBool::new(false));
         self.job = Some(Job {
             action,
@@ -710,37 +718,58 @@ impl App {
 
         let main = self.main as isize;
         let settings = self.settings.clone();
-        std::thread::spawn(move || {
-            let ffmpeg = Ffmpeg::locate(settings.ffmpeg_path.as_deref());
-            let office = Office::locate(settings.office_path.as_deref());
-            let cx = batch::Context {
-                settings: &settings,
-                ffmpeg: ffmpeg.as_ref(),
-                office: office.as_ref(),
-                cancel: &cancel,
-            };
-            let run = std::panic::AssertUnwindSafe(|| {
-                batch::run(action, &files, &cx, &|p| unsafe {
-                    PostMessageW(main as HWND, WM_APP_PROGRESS, p.done, p.total as isize);
-                })
-            });
-            // A bug in a converter must not leave the UI stuck on "working".
-            let report = std::panic::catch_unwind(run).unwrap_or_else(|_| Report {
-                results: files
-                    .iter()
-                    .map(|f| batch::FileResult {
-                        input: f.clone(),
-                        outcome: Outcome::Failed("internal error (see log)".into()),
+        // Helpers were found at startup / when the menu opened; reuse them.
+        let ffmpeg = self.ffmpeg.clone();
+        let office = self.office.clone();
+        let spawned = std::thread::Builder::new()
+            .name("calamansi-job".into())
+            .spawn(move || {
+                util::log("job thread: running");
+                let started = std::time::Instant::now();
+                let cx = batch::Context {
+                    settings: &settings,
+                    ffmpeg: ffmpeg.as_ref(),
+                    office: office.as_ref(),
+                    cancel: &cancel,
+                };
+                let run = std::panic::AssertUnwindSafe(|| {
+                    batch::run(action, &files, &cx, &|p| unsafe {
+                        PostMessageW(main as HWND, WM_APP_PROGRESS, p.done, p.total as isize);
                     })
-                    .collect(),
-            });
-            let boxed = Box::into_raw(Box::new(report));
-            unsafe {
-                if PostMessageW(main as HWND, WM_APP_DONE, 0, boxed as isize) == 0 {
-                    drop(Box::from_raw(boxed));
+                });
+                // A bug in a converter must not leave the UI stuck on "working".
+                let report = std::panic::catch_unwind(run).unwrap_or_else(|_| Report {
+                    results: files
+                        .iter()
+                        .map(|f| batch::FileResult {
+                            input: f.clone(),
+                            outcome: Outcome::Failed("internal error (see log)".into()),
+                        })
+                        .collect(),
+                });
+                util::log(&format!(
+                    "job thread: finished in {:.1}s",
+                    started.elapsed().as_secs_f32()
+                ));
+                let boxed = Box::into_raw(Box::new(report));
+                unsafe {
+                    if PostMessageW(main as HWND, WM_APP_DONE, 0, boxed as isize) == 0 {
+                        util::log("job thread: couldn't deliver the result to the window");
+                        drop(Box::from_raw(boxed));
+                    }
                 }
-            }
-        });
+            });
+        if let Err(e) = spawned {
+            util::log(&format!("couldn't start the job thread: {e}"));
+            self.job = None;
+            self.show_pill(
+                PillKind::Failure,
+                "Couldn't start the conversion",
+                &e.to_string(),
+                None,
+                Vec::new(),
+            );
+        }
     }
 
     fn on_progress(&mut self, done: usize, total: usize) {
@@ -997,7 +1026,9 @@ impl App {
         p.progress = progress;
         p.outputs = outputs;
         p.visible = true;
-        self.render_pill();
+        if !self.render_pill() {
+            util::log(&format!("couldn't draw the message: {title}"));
+        }
         unsafe {
             ShowWindow(self.pill.hwnd, SW_SHOWNOACTIVATE);
             KillTimer(self.main, TIMER_PILL);
@@ -1013,10 +1044,10 @@ impl App {
         }
     }
 
-    fn render_pill(&self) {
+    fn render_pill(&self) -> bool {
         let p = &self.pill;
         if !p.visible {
-            return;
+            return true;
         }
         let s = p.scale;
         let px = |v: f32| (v * s).round() as i32;
@@ -1087,7 +1118,7 @@ impl App {
                 centered: false,
             },
         ];
-        layered::present(p.hwnd, Content::Visible(&canvas, &texts), p.origin);
+        layered::present(p.hwnd, Content::Visible(&canvas, &texts), p.origin)
     }
 
     fn hide_pill(&mut self) {
@@ -1508,7 +1539,9 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                 return 0;
             }
             let report = *Box::from_raw(l as *mut Report);
-            with(move |a| a.on_done(report));
+            if with(move |a| a.on_done(report)).is_none() {
+                util::log("job result arrived but the app state was unavailable");
+            }
             0
         }
         WM_APP_SELFTEST => {
