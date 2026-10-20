@@ -134,39 +134,47 @@ fn libreoffice_paths() -> Vec<PathBuf> {
     v
 }
 
-/// PowerShell script for one Office conversion. Paths come in through
-/// environment variables, so no quoting of user file names is needed.
+/// The Office application that opens a family, with its process name.
+fn ms_app(family: OfficeFamily) -> (&'static str, &'static str) {
+    match family {
+        OfficeFamily::Text => ("Word.Application", "WINWORD"),
+        OfficeFamily::Sheet => ("Excel.Application", "EXCEL"),
+        OfficeFamily::Slides => ("PowerPoint.Application", "POWERPNT"),
+    }
+}
+
+/// PowerShell for one Office conversion, using the application object `$a`.
+/// Paths come in through environment variables, so no quoting of user file
+/// names is needed.
 fn ms_script(family: OfficeFamily, to: Format) -> Result<&'static str> {
     use Format::*;
     Ok(match (family, to) {
         // wdFormatPDF = 17, wdFormatDocumentDefault = 16. Open(FileName,
         // ConfirmConversions=false, ReadOnly=true, AddToRecentFiles=false).
         (OfficeFamily::Text, Pdf) => {
-            "$w=New-Object -ComObject Word.Application;$w.Visible=$false;$w.DisplayAlerts=0;\
-             try{$d=$w.Documents.Open($env:CAL_IN,$false,$true,$false);$d.ExportAsFixedFormat($env:CAL_OUT,17);$d.Close(0)}finally{$w.Quit()}"
+            "$a.Visible=$false;$a.DisplayAlerts=0;\
+             $d=$a.Documents.Open($env:CAL_IN,$false,$true,$false);$d.ExportAsFixedFormat($env:CAL_OUT,17);$d.Close(0)"
         }
         (OfficeFamily::Text, Docx) => {
-            "$w=New-Object -ComObject Word.Application;$w.Visible=$false;$w.DisplayAlerts=0;\
-             try{$d=$w.Documents.Open($env:CAL_IN,$false,$true,$false);$d.SaveAs2($env:CAL_OUT,16);$d.Close(0)}finally{$w.Quit()}"
+            "$a.Visible=$false;$a.DisplayAlerts=0;\
+             $d=$a.Documents.Open($env:CAL_IN,$false,$true,$false);$d.SaveAs2($env:CAL_OUT,16);$d.Close(0)"
         }
         // xlTypePDF = 0, xlOpenXMLWorkbook = 51.
         (OfficeFamily::Sheet, Pdf) => {
-            "$x=New-Object -ComObject Excel.Application;$x.Visible=$false;$x.DisplayAlerts=$false;\
-             try{$b=$x.Workbooks.Open($env:CAL_IN,0,$true);$b.ExportAsFixedFormat(0,$env:CAL_OUT);$b.Close($false)}finally{$x.Quit()}"
+            "$a.Visible=$false;$a.DisplayAlerts=$false;\
+             $b=$a.Workbooks.Open($env:CAL_IN,0,$true);$b.ExportAsFixedFormat(0,$env:CAL_OUT);$b.Close($false)"
         }
         (OfficeFamily::Sheet, Xlsx) => {
-            "$x=New-Object -ComObject Excel.Application;$x.Visible=$false;$x.DisplayAlerts=$false;\
-             try{$b=$x.Workbooks.Open($env:CAL_IN,0,$true);$b.SaveAs($env:CAL_OUT,51);$b.Close($false)}finally{$x.Quit()}"
+            "$a.Visible=$false;$a.DisplayAlerts=$false;\
+             $b=$a.Workbooks.Open($env:CAL_IN,0,$true);$b.SaveAs($env:CAL_OUT,51);$b.Close($false)"
         }
         // ppSaveAsPDF = 32, ppSaveAsOpenXMLPresentation = 24.
         // Open(FileName, ReadOnly=msoTrue, Untitled=msoFalse, WithWindow=msoFalse).
         (OfficeFamily::Slides, Pdf) => {
-            "$p=New-Object -ComObject PowerPoint.Application;\
-             try{$r=$p.Presentations.Open($env:CAL_IN,-1,0,0);$r.SaveAs($env:CAL_OUT,32);$r.Close()}finally{$p.Quit()}"
+            "$r=$a.Presentations.Open($env:CAL_IN,-1,0,0);$r.SaveAs($env:CAL_OUT,32);$r.Close()"
         }
         (OfficeFamily::Slides, Pptx) => {
-            "$p=New-Object -ComObject PowerPoint.Application;\
-             try{$r=$p.Presentations.Open($env:CAL_IN,-1,0,0);$r.SaveAs($env:CAL_OUT,24);$r.Close()}finally{$p.Quit()}"
+            "$r=$a.Presentations.Open($env:CAL_IN,-1,0,0);$r.SaveAs($env:CAL_OUT,24);$r.Close()"
         }
         _ => {
             return Err(CoreError::InvalidInput(format!(
@@ -174,6 +182,40 @@ fn ms_script(family: OfficeFamily, to: Format) -> Result<&'static str> {
             )))
         }
     })
+}
+
+/// Word asks "Word will now convert your PDF…" before opening a PDF. A
+/// hidden Word can't show that prompt, so it would wait forever. Turn the
+/// prompt off for the conversion (per Office version) and put it back after.
+const WORD_PDF_PROMPT_OFF: &str = "$keys=@(Get-ChildItem 'HKCU:\\Software\\Microsoft\\Office' -EA SilentlyContinue|\
+Where-Object{$_.PSChildName -match '^\\d+\\.\\d+$'}|ForEach-Object{Join-Path $_.PSPath 'Word\\Options'});$old=@{};\
+foreach($k in $keys){if(!(Test-Path $k)){New-Item $k -Force|Out-Null};\
+$old[$k]=(Get-ItemProperty $k -Name DisableConvertPdfWarning -EA SilentlyContinue).DisableConvertPdfWarning;\
+Set-ItemProperty $k -Name DisableConvertPdfWarning -Value 1 -Type DWord};";
+
+const WORD_PDF_PROMPT_RESTORE: &str = "foreach($k in $keys){if($null -eq $old[$k]){\
+Remove-ItemProperty $k -Name DisableConvertPdfWarning -EA SilentlyContinue}else{\
+Set-ItemProperty $k -Name DisableConvertPdfWarning -Value $old[$k] -Type DWord}};";
+
+/// The whole PowerShell command for a conversion.
+fn ms_command(input: &Path, family: OfficeFamily, to: Format) -> Result<String> {
+    let (prog_id, process) = ms_app(family);
+    let body = ms_script(family, to)?;
+    let pdf_in = crate::format::detect(input) == Some(Format::Pdf);
+    let (pre, post) = if pdf_in && family == OfficeFamily::Text {
+        (WORD_PDF_PROMPT_OFF, WORD_PDF_PROMPT_RESTORE)
+    } else {
+        ("", "")
+    };
+    // Record the process id of the instance we start, so a hung Office can
+    // be stopped (killing PowerShell alone leaves Office running).
+    Ok(format!(
+        "$ErrorActionPreference='Stop';{pre}\
+         $a=New-Object -ComObject {prog_id};\
+         $p=Get-Process {process} -EA SilentlyContinue|Sort-Object StartTime -Descending|Select-Object -First 1;\
+         if($p){{Set-Content -LiteralPath $env:CAL_PIDFILE -Value $p.Id}};\
+         try{{{body}}}finally{{try{{$a.Quit()}}catch{{}};{post}}}"
+    ))
 }
 
 fn microsoft(
@@ -184,9 +226,20 @@ fn microsoft(
     cancel: &AtomicBool,
     timeout: Duration,
 ) -> Result<()> {
-    let script = format!("$ErrorActionPreference='Stop';{}", ms_script(family, to)?);
+    let script = ms_command(input, family, to)?;
+    // A healthy Office conversion takes seconds; a stuck one should give up
+    // well before the general helper timeout.
+    let timeout = timeout.min(Duration::from_secs(180));
     // Office needs absolute paths.
     let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let pidfile = std::env::temp_dir().join(format!(
+        "calamansi-office-{}-{}.pid",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
     let child = hidden_command(Path::new("powershell.exe"))
         .args([
             "-NoProfile",
@@ -198,10 +251,26 @@ fn microsoft(
         ])
         .env("CAL_IN", abs(input))
         .env("CAL_OUT", abs(output))
+        .env("CAL_PIDFILE", &pidfile)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()?;
-    wait_with_timeout(child, cancel, timeout, "Microsoft Office")?;
+    let result = wait_with_timeout(child, cancel, timeout, "Microsoft Office");
+    if result.is_err() {
+        // Stop the Office instance this conversion started, if it's still there.
+        if let Some(pid) = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+        {
+            let _ = hidden_command(Path::new("taskkill.exe"))
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+    let _ = std::fs::remove_file(&pidfile);
+    result?;
     if !output.is_file() {
         return Err(CoreError::InvalidInput(
             "Microsoft Office didn't produce a file".into(),
