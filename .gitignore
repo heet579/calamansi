@@ -1,0 +1,5 @@
+/target
+/dist
+*.calamansi-part*
+.DS_Store
+Thumbs.db

@@ -1,0 +1,34 @@
+name: Bug report
+description: Something didn't work
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Calamansi version
+      placeholder: "0.1.0 (tray → About)"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and display scaling
+      placeholder: "Windows 11 24H2, 150 %"
+  - type: input
+    id: ffmpeg
+    attributes:
+      label: FFmpeg (if audio/video)
+      placeholder: "winget ffmpeg 7.1 / not installed"
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Relevant lines from %LOCALAPPDATA%\Calamansi\calamansi.log (tray → Open log folder). Remove anything private.
+      render: text

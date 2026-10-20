@@ -1,0 +1,19 @@
+name: Format or tool request
+description: Ask for a new conversion or tool
+labels: [format request]
+body:
+  - type: input
+    id: route
+    attributes:
+      label: From → to
+      placeholder: "HEIC → PNG without FFmpeg"
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it would help
+  - type: textarea
+    id: how
+    attributes:
+      label: Any library or approach you know of

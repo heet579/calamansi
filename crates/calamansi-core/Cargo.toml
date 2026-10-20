@@ -1,0 +1,21 @@
+[package]
+name = "calamansi-core"
+description = "Local file conversion engine for Calamansi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+image.workspace = true
+lopdf.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
