@@ -18,7 +18,30 @@ fn convert_targets_and_tools() {
 
     let t = calamansi(&out).arg("targets").arg(&png).output().unwrap();
     assert!(t.status.success());
-    assert!(String::from_utf8_lossy(&t.stdout).starts_with("JPEG"));
+    assert!(String::from_utf8_lossy(&t.stdout).starts_with("PDF"));
+
+    // Image -> PDF -> PNG pages, and a tool.
+    let c = calamansi(&out)
+        .args(["convert", "--to", "pdf"])
+        .arg(&png)
+        .output()
+        .unwrap();
+    assert!(c.status.success(), "{}", String::from_utf8_lossy(&c.stderr));
+    let pdf = out.join("pic.pdf");
+    assert!(pdf.is_file());
+    let c = calamansi(&out)
+        .args(["convert", "--to", "png"])
+        .arg(&pdf)
+        .output()
+        .unwrap();
+    assert!(c.status.success(), "{}", String::from_utf8_lossy(&c.stderr));
+    let c = calamansi(&out)
+        .args(["tool", "rotate-pdf"])
+        .arg(&pdf)
+        .output()
+        .unwrap();
+    assert!(c.status.success(), "{}", String::from_utf8_lossy(&c.stderr));
+    assert!(out.join("pic rotated.pdf").is_file());
 
     let c = calamansi(&out)
         .args(["convert", "--to", "jpg"])
@@ -36,7 +59,11 @@ fn convert_targets_and_tools() {
         .unwrap();
     assert!(out.join("pic (2).jpg").is_file());
 
-    let s = calamansi(&out).arg("sha256").arg(&png).output().unwrap();
+    let s = calamansi(&out)
+        .args(["tool", "sha256"])
+        .arg(&png)
+        .output()
+        .unwrap();
     assert_eq!(
         String::from_utf8_lossy(&s.stdout)
             .split_whitespace()

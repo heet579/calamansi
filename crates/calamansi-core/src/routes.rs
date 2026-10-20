@@ -1,6 +1,6 @@
 //! Which conversions exist, and which engine performs each one.
 
-use crate::format::{Format, Kind};
+use crate::format::{Format, Kind, OfficeFamily};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Engine {
@@ -8,10 +8,38 @@ pub enum Engine {
     Native,
     /// Requires an FFmpeg executable on the machine.
     Ffmpeg,
+    /// Requires Microsoft Office or LibreOffice on the machine.
+    Office,
+}
+
+/// Optional helper programs found on this machine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Available {
+    pub ffmpeg: bool,
+    pub office: bool,
+}
+
+impl Available {
+    pub const NONE: Available = Available {
+        ffmpeg: false,
+        office: false,
+    };
+    pub const ALL: Available = Available {
+        ffmpeg: true,
+        office: true,
+    };
+
+    pub fn has(self, engine: Engine) -> bool {
+        match engine {
+            Engine::Native => true,
+            Engine::Ffmpeg => self.ffmpeg,
+            Engine::Office => self.office,
+        }
+    }
 }
 
 /// Images the built-in decoder can read.
-fn native_image_in(f: Format) -> bool {
+pub fn native_image_in(f: Format) -> bool {
     use Format::*;
     matches!(f, Png | Jpeg | Webp | Gif | Bmp | Tiff | Ico)
 }
@@ -39,17 +67,26 @@ pub fn route(from: Format, to: Format) -> Option<Engine> {
                 Some(Engine::Ffmpeg)
             }
         }
-        (Kind::Image, Kind::Document) if to == Pdf => {
-            if native_image_in(from) {
-                Some(Engine::Native)
-            } else {
-                None
-            }
-        }
+        (Kind::Image, _) if to == Pdf => native_image_in(from).then_some(Engine::Native),
         (Kind::Document, _) => match (from, to) {
             (Pdf, Txt) | (Txt, Pdf) => Some(Engine::Native),
+            // PDF pages rendered to pictures.
+            (Pdf, Png | Jpeg | Webp | Tiff | Bmp) => Some(Engine::Native),
+            // Built-in DOCX writer; Word is used instead when installed.
+            (Pdf | Txt, Docx) => Some(Engine::Native),
             _ => None,
         },
+        (Kind::Office, _) => {
+            let family = from.office_family()?;
+            match to {
+                Pdf => Some(Engine::Office),
+                Txt if from == Docx => Some(Engine::Native),
+                Docx if family == OfficeFamily::Text => Some(Engine::Office),
+                Xlsx if family == OfficeFamily::Sheet => Some(Engine::Office),
+                Pptx if family == OfficeFamily::Slides => Some(Engine::Office),
+                _ => None,
+            }
+        }
         (Kind::Subtitle, Kind::Subtitle) => Some(Engine::Native),
         (Kind::Subtitle, Kind::Document) if to == Txt => Some(Engine::Native),
         (Kind::Video, Kind::Video) | (Kind::Video, Kind::Audio) | (Kind::Audio, Kind::Audio) => {
@@ -62,15 +99,18 @@ pub fn route(from: Format, to: Format) -> Option<Engine> {
 
 /// Wheel ordering: the most commonly wanted targets first.
 const PRIORITY: &[Format] = &[
+    Format::Pdf,
     Format::Jpeg,
     Format::Png,
+    Format::Docx,
     Format::Webp,
-    Format::Pdf,
     Format::Mp4,
     Format::Mp3,
     Format::Gif,
-    Format::Avif,
     Format::Txt,
+    Format::Avif,
+    Format::Xlsx,
+    Format::Pptx,
     Format::Srt,
     Format::Vtt,
     Format::M4a,
@@ -90,9 +130,9 @@ const PRIORITY: &[Format] = &[
 /// Targets offered for a selection of input files.
 ///
 /// A target is offered when every input can reach it (files already in that
-/// format are skipped, as long as at least one file actually changes).
-/// FFmpeg routes are left out when FFmpeg isn't installed.
-pub fn targets_for(inputs: &[Format], ffmpeg_available: bool) -> Vec<(Format, Engine)> {
+/// format are skipped, as long as at least one file actually changes) and
+/// every engine involved is installed.
+pub fn targets_for(inputs: &[Format], available: Available) -> Vec<(Format, Engine)> {
     if inputs.is_empty() {
         return Vec::new();
     }
@@ -106,19 +146,19 @@ pub fn targets_for(inputs: &[Format], ffmpeg_available: bool) -> Vec<(Format, En
                 continue;
             }
             match route(from, to) {
-                Some(e) => {
+                Some(e) if available.has(e) => {
                     any_change = true;
-                    if e == Engine::Ffmpeg {
-                        engine = Engine::Ffmpeg;
+                    if e != Engine::Native {
+                        engine = e;
                     }
                 }
-                None => {
+                _ => {
                     ok = false;
                     break;
                 }
             }
         }
-        if ok && any_change && (engine == Engine::Native || ffmpeg_available) {
+        if ok && any_change {
             out.push((to, engine));
         }
     }
@@ -130,9 +170,14 @@ mod tests {
     use super::*;
     use Format::*;
 
+    fn targets(inputs: &[Format], a: Available) -> Vec<Format> {
+        targets_for(inputs, a).into_iter().map(|t| t.0).collect()
+    }
+
     #[test]
     fn image_routes() {
         assert_eq!(route(Png, Jpeg), Some(Engine::Native));
+        assert_eq!(route(Png, Pdf), Some(Engine::Native));
         assert_eq!(route(Heic, Jpeg), Some(Engine::Ffmpeg));
         assert_eq!(route(Png, Avif), Some(Engine::Ffmpeg));
         assert_eq!(route(Png, Heic), None);
@@ -141,31 +186,53 @@ mod tests {
     }
 
     #[test]
-    fn mixed_selection_offers_shared_targets() {
-        let t: Vec<Format> = targets_for(&[Png, Jpeg], false)
-            .into_iter()
-            .map(|t| t.0)
-            .collect();
+    fn document_routes() {
+        assert_eq!(route(Pdf, Png), Some(Engine::Native));
+        assert_eq!(route(Pdf, Docx), Some(Engine::Native));
+        assert_eq!(route(Docx, Pdf), Some(Engine::Office));
+        assert_eq!(route(Docx, Txt), Some(Engine::Native));
+        assert_eq!(route(Doc, Docx), Some(Engine::Office));
+        assert_eq!(route(Xls, Xlsx), Some(Engine::Office));
+        assert_eq!(route(Xlsx, Docx), None);
+    }
+
+    #[test]
+    fn pdf_offers_images_and_word() {
+        let t = targets(&[Pdf], Available::NONE);
+        assert_eq!(t[..3], [Jpeg, Png, Docx]);
+        assert!(t.contains(&Txt));
+    }
+
+    #[test]
+    fn images_offer_pdf_first() {
+        let t = targets(&[Png, Jpeg], Available::NONE);
+        assert_eq!(t[0], Pdf);
         assert!(
             t.contains(&Jpeg),
             "PNG+JPEG -> JPEG converts the PNG, skips the JPEG"
         );
-        assert!(t.contains(&Pdf));
         assert!(!t.contains(&Avif), "AVIF needs FFmpeg");
-        assert_eq!(t[0], Jpeg, "priority order");
     }
 
     #[test]
-    fn ffmpeg_routes_hidden_without_ffmpeg() {
-        assert!(targets_for(&[Mp4], false).is_empty());
-        let t: Vec<Format> = targets_for(&[Mp4], true).into_iter().map(|t| t.0).collect();
+    fn helper_routes_hidden_when_missing() {
+        assert!(targets(&[Mp4], Available::NONE).is_empty());
+        let t = targets(
+            &[Mp4],
+            Available {
+                ffmpeg: true,
+                office: false,
+            },
+        );
         assert!(t.contains(&Mp3) && t.contains(&Gif) && !t.contains(&Mp4));
+        assert!(targets(&[Docx], Available::NONE) == [Txt]);
+        assert_eq!(targets(&[Docx], Available::ALL), [Pdf, Txt]);
     }
 
     #[test]
     fn incompatible_selection_has_no_targets() {
-        assert!(targets_for(&[Png, Mp3], true).is_empty());
-        assert!(targets_for(&[], true).is_empty());
+        assert!(targets_for(&[Png, Mp3], Available::ALL).is_empty());
+        assert!(targets_for(&[], Available::ALL).is_empty());
     }
 
     #[test]

@@ -58,7 +58,8 @@ pub fn candidate_paths(custom: Option<&Path>) -> Vec<PathBuf> {
     out
 }
 
-fn command(bin: &Path) -> Command {
+/// A command that runs without flashing a console window on Windows.
+pub fn hidden_command(bin: &Path) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(bin);
     #[cfg(windows)]
@@ -81,7 +82,9 @@ impl Ffmpeg {
     }
 
     pub fn probe(path: &Path) -> Result<Ffmpeg> {
-        let out = command(path).args(["-hide_banner", "-version"]).output()?;
+        let out = hidden_command(path)
+            .args(["-hide_banner", "-version"])
+            .output()?;
         if !out.status.success() {
             return Err(CoreError::Ffmpeg("couldn't run ffmpeg -version".into()));
         }
@@ -90,7 +93,9 @@ impl Ffmpeg {
             .next()
             .unwrap_or("ffmpeg")
             .to_string();
-        let enc = command(path).args(["-hide_banner", "-encoders"]).output()?;
+        let enc = hidden_command(path)
+            .args(["-hide_banner", "-encoders"])
+            .output()?;
         Ok(Ffmpeg {
             path: path.to_path_buf(),
             version,
@@ -205,55 +210,168 @@ impl Ffmpeg {
 
     /// Run FFmpeg, killing it on cancellation or after `timeout`.
     pub fn run(&self, args: &[OsString], cancel: &AtomicBool, timeout: Duration) -> Result<()> {
-        let mut child = command(&self.path)
+        let child = hidden_command(&self.path)
             .args(args)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()?;
-        let mut stderr = child.stderr.take().expect("piped");
-        let reader = std::thread::spawn(move || {
+        wait_with_timeout(child, cancel, timeout, "FFmpeg")
+    }
+
+    /// FFmpeg arguments for a media tool.
+    pub fn tool_args(
+        &self,
+        tool: MediaTool,
+        from: Format,
+        input: &Path,
+        output: &Path,
+    ) -> Result<Vec<OsString>> {
+        let mut a: Vec<OsString> = ["-hide_banner", "-nostdin", "-loglevel", "error", "-y"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let missing =
+            |what: &str| CoreError::Ffmpeg(format!("this FFmpeg build has no {what} encoder"));
+        let h264 = self
+            .pick(&["libx264", "h264_mf", "mpeg4"])
+            .ok_or_else(|| missing("H.264"))?;
+        let mut push = |xs: &[&str]| a.extend(xs.iter().map(OsString::from));
+        if tool == MediaTool::Snapshot {
+            // Seek before the input: fast, and lands on 1 s (or the first frame).
+            push(&["-ss", "1"]);
+        }
+        push(&["-i"]);
+        a.push(input.as_os_str().to_owned());
+        let mut push = |xs: &[&str]| a.extend(xs.iter().map(OsString::from));
+        let x264 = |crf: &'static str| -> Vec<&'static str> {
+            if h264 == "libx264" {
+                vec![
+                    "-c:v", "libx264", "-preset", "medium", "-crf", crf, "-pix_fmt", "yuv420p",
+                ]
+            } else {
+                vec!["-c:v", h264, "-q:v", "5", "-pix_fmt", "yuv420p"]
+            }
+        };
+        match tool {
+            MediaTool::CompressVideo => {
+                push(&["-vf", "scale='min(1280,iw)':-2"]);
+                push(&x264("28"));
+                push(&["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"]);
+            }
+            MediaTool::Mute => push(&["-map", "0:v", "-c", "copy", "-an"]),
+            MediaTool::Snapshot => push(&["-frames:v", "1", "-update", "1"]),
+            MediaTool::RotateVideo => {
+                push(&["-vf", "transpose=1"]);
+                push(&x264("20"));
+                push(&["-c:a", "copy"]);
+            }
+            MediaTool::Normalize => {
+                let enc = audio_encoder_for(self, from)?;
+                push(&["-vn", "-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]);
+                push(&enc);
+            }
+            MediaTool::Mono => {
+                let enc = audio_encoder_for(self, from)?;
+                push(&["-vn", "-ac", "1"]);
+                push(&enc);
+            }
+        }
+        a.push(output.as_os_str().to_owned());
+        Ok(a)
+    }
+}
+
+/// Audio tools write the same format they read.
+fn audio_encoder_for(ff: &Ffmpeg, f: Format) -> Result<Vec<&'static str>> {
+    let missing =
+        |what: &str| CoreError::Ffmpeg(format!("this FFmpeg build has no {what} encoder"));
+    Ok(match f {
+        Format::Mp3 => vec![
+            "-c:a",
+            ff.pick(&["libmp3lame"]).ok_or_else(|| missing("MP3"))?,
+            "-q:a",
+            "2",
+        ],
+        Format::Wav => vec!["-c:a", "pcm_s16le"],
+        Format::Flac => vec!["-c:a", "flac"],
+        Format::Ogg => vec![
+            "-c:a",
+            ff.pick(&["libvorbis", "libopus"])
+                .ok_or_else(|| missing("Ogg"))?,
+        ],
+        _ => vec!["-c:a", "aac", "-b:a", "192k"],
+    })
+}
+
+/// Media tools on the Ctrl+Shift wheel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaTool {
+    CompressVideo,
+    Mute,
+    Snapshot,
+    RotateVideo,
+    Normalize,
+    Mono,
+}
+
+/// Wait for a helper process, killing it on cancellation or after `timeout`.
+/// On failure the last lines of its stderr become the error message.
+pub fn wait_with_timeout(
+    mut child: std::process::Child,
+    cancel: &AtomicBool,
+    timeout: Duration,
+    name: &str,
+) -> Result<()> {
+    let reader = child.stderr.take().map(|mut stderr| {
+        std::thread::spawn(move || {
             let mut s = String::new();
             let _ = stderr.read_to_string(&mut s);
             s
-        });
-        let started = Instant::now();
-        let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
-            if cancel.load(Ordering::Relaxed) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(CoreError::Cancelled);
-            }
-            if started.elapsed() > timeout {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(CoreError::Ffmpeg(format!(
-                    "timed out after {} minutes",
-                    timeout.as_secs() / 60
-                )));
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        let log = reader.join().unwrap_or_default();
-        if status.success() {
-            Ok(())
+        })
+    });
+    let fail = |m: String| {
+        if name == "FFmpeg" {
+            CoreError::Ffmpeg(m)
         } else {
-            let tail: Vec<&str> = log
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .rev()
-                .take(3)
-                .collect();
-            let msg = tail.into_iter().rev().collect::<Vec<_>>().join(" / ");
-            Err(CoreError::Ffmpeg(if msg.is_empty() {
-                format!("exit status {status}")
-            } else {
-                msg
-            }))
+            CoreError::InvalidInput(format!("{name}: {m}"))
         }
+    };
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CoreError::Cancelled);
+        }
+        if started.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(fail(format!(
+                "timed out after {} minutes",
+                timeout.as_secs().div_ceil(60)
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let log = reader.and_then(|r| r.join().ok()).unwrap_or_default();
+    if status.success() {
+        return Ok(());
     }
+    let tail: Vec<&str> = log
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .rev()
+        .take(3)
+        .collect();
+    let msg = tail.into_iter().rev().collect::<Vec<_>>().join(" / ");
+    Err(fail(if msg.is_empty() {
+        format!("exit status {status}")
+    } else {
+        msg
+    }))
 }
 
 #[cfg(test)]

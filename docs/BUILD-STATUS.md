@@ -4,7 +4,7 @@
 
 | Part | Status |
 | --- | --- |
-| `calamansi-core` | 43 unit tests: formats, routes, naming races, images, PDF create/merge/split/text, subtitles, checksum, settings, batch isolation and cancellation, wheel layout, real FFmpeg conversion when installed |
+| `calamansi-core` | 58 unit tests: formats, routes, naming races, images and image tools, PDF create/merge/split/rotate/reverse/compress/render/text, Word read/write, subtitles, checksum, settings, batch isolation and cancellation, wheel layout, self-test; real FFmpeg and LibreOffice conversions when installed |
 | `calamansi-cli` | Integration tests: convert, targets, no-overwrite naming, checksums, video → GIF/WAV/WebM via FFmpeg |
 | `calamansi-win` | Type-checked and linted (clippy, `-D warnings`). Unit tests for packing, parsing and the icon run on Windows CI |
 
@@ -16,6 +16,10 @@ works through the checklist below, treat 0.1 as a preview.
 ### Manual checklist
 
 Record Windows version, display scaling (100 %, 150 %, mixed monitors) and results in the PR or issue.
+
+**Self-test (do this first)**
+- [ ] Tray → *Run self-test* → "All N checks passed". If not, the log lists each failing check. This
+      separates engine problems from drag-and-drop problems.
 
 **Startup**
 - [ ] First launch shows the "Calamansi is in your system tray" pill and creates `%APPDATA%\Calamansi\settings.json`
@@ -47,6 +51,10 @@ Record Windows version, display scaling (100 %, 150 %, mixed monitors) and resul
 - [ ] A failure (e.g. a renamed `.txt` as `.png`) stays until clicked and names the file
 - [ ] Clicking during a long FFmpeg job cancels it and leaves no partial file
 - [ ] SHA-256 tool copies `hash  filename` lines to the clipboard
+
+**Office**
+- [ ] With Microsoft Office: Word/Excel/PowerPoint files offer PDF; conversion runs without any Office window appearing
+- [ ] PDF → Word with Word installed keeps the layout
 
 **FFmpeg**
 - [ ] Without FFmpeg: video files show "Nothing to do"; tray says "FFmpeg not found"

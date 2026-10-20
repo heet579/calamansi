@@ -6,7 +6,7 @@
 
 use crate::batch::{Action, Tool};
 use crate::format::Format;
-use crate::routes;
+use crate::routes::{self, Available};
 
 pub const MAX_SEGMENTS: usize = 12;
 
@@ -28,9 +28,9 @@ pub struct Item {
 }
 
 /// Wheel entries for a selection.
-pub fn items(mode: Mode, inputs: &[Format], ffmpeg_available: bool) -> Vec<Item> {
+pub fn items(mode: Mode, inputs: &[Format], available: Available) -> Vec<Item> {
     let mut v: Vec<Item> = match mode {
-        Mode::Convert => routes::targets_for(inputs, ffmpeg_available)
+        Mode::Convert => routes::targets_for(inputs, available)
             .into_iter()
             .map(|(f, _)| Item {
                 label: f.label().to_string(),
@@ -39,7 +39,7 @@ pub fn items(mode: Mode, inputs: &[Format], ffmpeg_available: bool) -> Vec<Item>
             .collect(),
         Mode::Tools => Tool::ALL
             .iter()
-            .filter(|t| t.applies_to(inputs))
+            .filter(|t| t.applies_to(inputs, available))
             .map(|&t| Item {
                 label: t.label().to_string(),
                 action: Action::Tool(t),
@@ -67,13 +67,16 @@ pub struct Geometry {
 }
 
 impl Geometry {
+    /// Wheel size in pixels at 100 % display scaling.
+    pub const BASE: f32 = 380.0;
+
     pub fn for_scale(scale: f32) -> Geometry {
         let s = scale.clamp(0.5, 4.0);
-        let size = (320.0 * s).round() as u32;
+        let size = (Self::BASE * s).round() as u32;
         Geometry {
             size,
-            r_outer: 150.0 * s,
-            r_inner: 62.0 * s,
+            r_outer: 180.0 * s,
+            r_inner: 66.0 * s,
             gap: 3.0 * s,
         }
     }
@@ -282,34 +285,46 @@ mod tests {
 
     #[test]
     fn convert_items_follow_routes() {
-        let it = items(Mode::Convert, &[Png], false);
-        assert_eq!(it[0].action, Action::Convert(Jpeg));
+        let it = items(Mode::Convert, &[Png], Available::NONE);
+        assert_eq!(it[0].action, Action::Convert(Pdf));
         assert!(it.iter().all(|i| i.action != Action::Convert(Png)));
         assert!(it.len() <= MAX_SEGMENTS);
     }
 
     #[test]
     fn tool_items() {
-        let labels: Vec<String> = items(Mode::Tools, &[Pdf, Pdf], false)
+        let labels: Vec<String> = items(Mode::Tools, &[Pdf, Pdf], Available::NONE)
             .into_iter()
             .map(|i| i.label)
             .collect();
-        assert_eq!(labels, ["Merge", "Split", "SHA-256"]);
+        assert_eq!(
+            labels,
+            [
+                "Merge",
+                "Split",
+                "Rotate",
+                "Reverse",
+                "Compress",
+                "Duplicate",
+                "Copy path",
+                "SHA-256"
+            ]
+        );
     }
 
     #[test]
     fn hit_testing_matches_layout() {
         let g = Geometry::for_scale(1.0);
         let n = 8;
-        assert_eq!(g.hit(160.0, 160.0, n), Hit::Center);
+        assert_eq!(g.hit(190.0, 190.0, n), Hit::Center);
         assert_eq!(g.hit(1.0, 1.0, n), Hit::Outside);
         assert_eq!(
-            g.hit(160.0, 20.0, n),
+            g.hit(190.0, 30.0, n),
             Hit::Segment(0),
             "straight up is the first segment"
         );
         assert_eq!(
-            g.hit(300.0, 160.0, n),
+            g.hit(340.0, 190.0, n),
             Hit::Segment(2),
             "3 o'clock is a quarter turn"
         );

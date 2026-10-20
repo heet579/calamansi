@@ -6,13 +6,16 @@
 
 pub mod batch;
 pub mod checksum;
+pub mod docx;
 pub mod error;
 pub mod format;
 pub mod image_ops;
 pub mod media;
 pub mod naming;
+pub mod office;
 pub mod pdf_ops;
 pub mod routes;
+pub mod selftest;
 pub mod settings;
 pub mod subtitles;
 pub mod wheel;

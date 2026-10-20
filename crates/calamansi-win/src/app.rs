@@ -14,6 +14,8 @@ use crate::{icon, integration};
 use calamansi_core::batch::{self, Action, Outcome, Report, Tool};
 use calamansi_core::format::{self, Format};
 use calamansi_core::media::Ffmpeg;
+use calamansi_core::office::Office;
+use calamansi_core::routes::Available;
 use calamansi_core::settings::{OutputLocation, Settings};
 use calamansi_core::wheel::{self, Canvas, Geometry, Hit, Item, Mode, Theme};
 use std::cell::RefCell;
@@ -39,6 +41,7 @@ pub const WM_APP_TRAY: u32 = WM_APP + 1;
 const WM_APP_PROGRESS: u32 = WM_APP + 4;
 const WM_APP_DONE: u32 = WM_APP + 5;
 pub const WM_APP_PICK: u32 = WM_APP + 6;
+const WM_APP_SELFTEST: u32 = WM_APP + 7;
 
 /// `COPYDATASTRUCT::dwData` tags used by a second instance.
 pub const COPY_ALREADY_RUNNING: usize = 0xCA1A_0000;
@@ -60,6 +63,8 @@ const ID_SETTINGS: usize = 30;
 const ID_FFMPEG: usize = 31;
 const ID_LOGS: usize = 32;
 const ID_ABOUT: usize = 40;
+const ID_SELFTEST: usize = 41;
+const ID_OFFICE: usize = 33;
 const ID_QUIT: usize = 99;
 
 const TEXT: [u8; 3] = Theme::DARK.text;
@@ -123,6 +128,7 @@ pub struct App {
     settings_path: PathBuf,
     settings: Settings,
     ffmpeg: Option<Ffmpeg>,
+    office: Option<Office>,
     wheel: WheelUi,
     pill: PillUi,
     job: Option<Job>,
@@ -220,6 +226,16 @@ pub fn start(first_run: bool, initial: Option<(Vec<PathBuf>, Mode)>) -> Result<H
         }
         hook::set_enabled(settings.drag_wheel);
         let ffmpeg = Ffmpeg::locate(settings.ffmpeg_path.as_deref());
+        let office = Office::locate(settings.office_path.as_deref());
+        util::log(&format!(
+            "start {} | ffmpeg: {} | office: {}",
+            env!("CARGO_PKG_VERSION"),
+            ffmpeg
+                .as_ref()
+                .map(|f| f.path.display().to_string())
+                .unwrap_or_else(|| "not found".into()),
+            office.as_ref().map(Office::name).unwrap_or("not found"),
+        ));
         let tb = wide("TaskbarCreated");
 
         let app = App {
@@ -229,6 +245,7 @@ pub fn start(first_run: bool, initial: Option<(Vec<PathBuf>, Mode)>) -> Result<H
             settings_path,
             settings,
             ffmpeg,
+            office,
             wheel: WheelUi {
                 hwnd: wheel_hwnd,
                 state: WheelState::Hidden,
@@ -267,7 +284,18 @@ pub fn start(first_run: bool, initial: Option<(Vec<PathBuf>, Mode)>) -> Result<H
             util::log("mouse hook not installed; drag wheel unavailable");
         }
 
-        if first_run {
+        if util::is_elevated() {
+            util::log("running as administrator: Windows blocks drag-and-drop from Explorer");
+            with(|a| {
+                a.show_pill(
+                    PillKind::Failure,
+                    "Running as administrator",
+                    "Windows blocks drops from Explorer. Start Calamansi normally.",
+                    None,
+                    Vec::new(),
+                )
+            });
+        } else if first_run {
             with(|a| {
                 a.show_pill(
                     PillKind::Info,
@@ -341,6 +369,16 @@ impl App {
         if stale {
             self.ffmpeg = Ffmpeg::locate(configured.as_deref());
         }
+        if self.office.is_none() {
+            self.office = Office::locate(self.settings.office_path.as_deref());
+        }
+    }
+
+    fn available(&self) -> Available {
+        Available {
+            ffmpeg: self.ffmpeg.is_some(),
+            office: self.office.is_some(),
+        }
     }
 
     fn save_settings(&mut self) {
@@ -353,13 +391,16 @@ impl App {
     fn items_for(&self, files: &[PathBuf], mode: Mode) -> Vec<Item> {
         let formats: Option<Vec<Format>> = files.iter().map(|p| format::detect(p)).collect();
         match formats {
-            Some(f) => wheel::items(mode, &f, self.ffmpeg.is_some()),
-            // Unrecognised files can still be checksummed.
+            Some(f) => wheel::items(mode, &f, self.available()),
+            // Unrecognised files still get the generic file actions.
             None if mode == Mode::Tools && !files.is_empty() => {
-                vec![Item {
-                    label: Tool::Sha256.label().into(),
-                    action: Action::Tool(Tool::Sha256),
-                }]
+                [Tool::Duplicate, Tool::CopyPath, Tool::Sha256]
+                    .into_iter()
+                    .map(|t| Item {
+                        label: t.label().into(),
+                        action: Action::Tool(t),
+                    })
+                    .collect()
             }
             None => Vec::new(),
         }
@@ -391,7 +432,7 @@ impl App {
             layered::present(w.hwnd, Content::Probe(&canvas), w.origin);
             return;
         }
-        let s = w.geom.size as f32 / 320.0;
+        let s = w.geom.size as f32 / Geometry::BASE;
         let px = |v: f32| (v * s).round() as i32;
         let mut texts = Vec::new();
         let n = w.items.len();
@@ -400,12 +441,12 @@ impl App {
             texts.push(Text {
                 text: item.label.clone(),
                 rect: (
-                    lx as i32 - px(40.0),
+                    lx as i32 - px(48.0),
                     ly as i32 - px(12.0),
-                    px(80.0),
+                    px(96.0),
                     px(24.0),
                 ),
-                size_px: px(if n > 9 { 12.0 } else { 14.0 }),
+                size_px: px(if n > 8 { 12.5 } else { 14.0 }),
                 bold: true,
                 color: TEXT,
                 centered: true,
@@ -481,6 +522,7 @@ impl App {
                 return;
             }
         }
+        util::log(&format!("drag start at {x},{y} (tools: {tools})"));
         unsafe { KillTimer(self.main, TIMER_WHEEL) };
         self.wheel.mode = if tools { Mode::Tools } else { Mode::Convert };
         self.wheel.state = WheelState::Probe;
@@ -504,6 +546,17 @@ impl App {
             return false;
         }
         self.wheel.items = self.items_for(&files, self.wheel.mode);
+        util::log(&format!(
+            "drag enter: {} file(s), {} option(s): {}",
+            files.len(),
+            self.wheel.items.len(),
+            self.wheel
+                .items
+                .iter()
+                .map(|i| i.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
         self.wheel.files = files;
         self.wheel.state = WheelState::Dragging;
         self.wheel.hovered = match self.wheel_hit(x, y) {
@@ -544,6 +597,10 @@ impl App {
         let items = self.items_for(&files, self.wheel.mode);
         self.wheel.items = items.clone();
         let hit = self.wheel_hit(x, y);
+        util::log(&format!(
+            "drop: {} file(s) at {x},{y} -> {hit:?}",
+            files.len()
+        ));
         self.hide_wheel();
         match hit {
             Hit::Segment(i) if i < items.len() => {
@@ -655,9 +712,11 @@ impl App {
         let settings = self.settings.clone();
         std::thread::spawn(move || {
             let ffmpeg = Ffmpeg::locate(settings.ffmpeg_path.as_deref());
+            let office = Office::locate(settings.office_path.as_deref());
             let cx = batch::Context {
                 settings: &settings,
                 ffmpeg: ffmpeg.as_ref(),
+                office: office.as_ref(),
                 cancel: &cancel,
             };
             let run = std::panic::AssertUnwindSafe(|| {
@@ -702,30 +761,52 @@ impl App {
 
     fn on_done(&mut self, report: Report) {
         let Some(job) = self.job.take() else { return };
+        util::log(&format!(
+            "job {:?}: {} ok, {} failed, {} output(s)",
+            job.action,
+            report.count(|o| matches!(o, Outcome::Done(_) | Outcome::Value(_))),
+            report.failures().len(),
+            report.outputs().len()
+        ));
         for (path, why) in report.failures() {
-            util::log(&format!("{}: {why}", path.display()));
+            util::log(&format!("  failed {}: {why}", path.display()));
         }
         let outputs: Vec<PathBuf> = report.outputs().into_iter().map(PathBuf::from).collect();
         let failures = report.failures();
         let ok = report.count(|o| matches!(o, Outcome::Done(_) | Outcome::Value(_)));
 
-        if job.action == Action::Tool(Tool::Sha256) && !report.values().is_empty() {
+        let is_value = matches!(job.action, Action::Tool(t) if t.is_value());
+        if is_value && !report.values().is_empty() {
+            let sha = job.action == Action::Tool(Tool::Sha256);
             let text: String = report
                 .values()
                 .iter()
-                .map(|(p, h)| format!("{h}  {}\r\n", file_name(p)))
+                .map(|(p, v)| {
+                    if sha {
+                        format!("{v}  {}\r\n", file_name(p))
+                    } else {
+                        format!("{v}\r\n")
+                    }
+                })
                 .collect();
             let copied = util::copy_to_clipboard(self.main, text.trim_end());
             let n = report.values().len();
+            let what = if sha { "checksum" } else { "path" };
             let title = match (copied, n) {
                 (false, _) => "Couldn't use the clipboard".to_string(),
-                (true, 1) => "Checksum copied".to_string(),
-                (true, n) => format!("{n} checksums copied"),
+                (true, 1) => format!("{}{} copied", what[..1].to_uppercase(), &what[1..]),
+                (true, n) => format!("{n} {what}s copied"),
             };
             let detail = report
                 .values()
                 .first()
-                .map(|(_, h)| format!("SHA-256 {}…", &h[..16]))
+                .map(|(_, v)| {
+                    if sha {
+                        format!("SHA-256 {}…", &v[..16])
+                    } else {
+                        v.to_string()
+                    }
+                })
                 .unwrap_or_default();
             return self.show_pill(
                 if copied {
@@ -792,6 +873,100 @@ impl App {
         };
         let detail = format!("{}: {why}{more}", file_name(first));
         self.show_pill(PillKind::Failure, &title, &detail, None, outputs);
+    }
+
+    // ----- Self-test ------------------------------------------------------
+
+    fn start_self_test(&mut self) {
+        if self.job.is_some() {
+            return;
+        }
+        self.reload_settings();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.job = Some(Job {
+            action: Action::Tool(Tool::Sha256),
+            count: 0,
+            cancel: cancel.clone(),
+        });
+        self.show_pill(
+            PillKind::Working,
+            "Running self-test…",
+            "Converting sample files",
+            None,
+            Vec::new(),
+        );
+        let main = self.main as isize;
+        let mut settings = self.settings.clone();
+        settings.output = OutputLocation::BesideSource;
+        std::thread::spawn(move || {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let dir = std::env::temp_dir()
+                .join("Calamansi self-test")
+                .join(stamp.to_string());
+            let ffmpeg = Ffmpeg::locate(settings.ffmpeg_path.as_deref());
+            let office = Office::locate(settings.office_path.as_deref());
+            let cx = batch::Context {
+                settings: &settings,
+                ffmpeg: ffmpeg.as_ref(),
+                office: office.as_ref(),
+                cancel: &cancel,
+            };
+            let checks = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                calamansi_core::selftest::run(&dir, &cx)
+            }))
+            .unwrap_or_default();
+            let boxed = Box::into_raw(Box::new((dir, checks)));
+            unsafe {
+                if PostMessageW(main as HWND, WM_APP_SELFTEST, 0, boxed as isize) == 0 {
+                    drop(Box::from_raw(boxed));
+                }
+            }
+        });
+    }
+
+    fn on_self_test(&mut self, dir: PathBuf, checks: Vec<calamansi_core::selftest::Check>) {
+        self.job = None;
+        util::log(&format!("self-test in {}", dir.display()));
+        for c in &checks {
+            match &c.result {
+                Ok(_) => util::log(&format!("  ok   {}", c.name)),
+                Err(e) => util::log(&format!("  FAIL {}: {e}", c.name)),
+            }
+        }
+        let failed: Vec<&calamansi_core::selftest::Check> =
+            checks.iter().filter(|c| !c.passed()).collect();
+        let first_output = checks
+            .iter()
+            .find_map(|c| c.result.as_ref().ok().and_then(|v| v.first().cloned()));
+        let outputs = first_output.into_iter().collect();
+        if checks.is_empty() {
+            self.show_pill(
+                PillKind::Failure,
+                "Self-test crashed",
+                "See the log for details",
+                None,
+                Vec::new(),
+            );
+        } else if failed.is_empty() {
+            let title = format!("All {} checks passed", checks.len());
+            self.show_pill(
+                PillKind::Success,
+                &title,
+                "Click to see the test files",
+                None,
+                outputs,
+            );
+        } else {
+            let title = format!("{} of {} checks failed", failed.len(), checks.len());
+            let detail = match &failed[0].result {
+                Err(e) => format!("{}: {e}", failed[0].name),
+                Ok(_) => String::new(),
+            };
+            self.show_pill(PillKind::Failure, &title, &detail, None, outputs);
+        }
     }
 
     // ----- Progress pill -----------------------------------------------------
@@ -974,6 +1149,7 @@ impl App {
             send_to: integration::in_send_to(),
             output: self.settings.output.clone(),
             ffmpeg: self.ffmpeg.as_ref().map(|f| f.version.clone()),
+            office: self.office.as_ref().map(|o| o.name()),
             busy: self.job.is_some(),
         }
     }
@@ -1044,6 +1220,18 @@ impl App {
                     Vec::new(),
                 ),
             },
+            ID_OFFICE => {
+                if self.office.is_none() {
+                    self.show_pill(
+                        PillKind::Info,
+                        "Office adds Word, Excel & PowerPoint",
+                        "Install Microsoft Office or LibreOffice, then reopen this menu",
+                        None,
+                        Vec::new(),
+                    );
+                }
+            }
+            ID_SELFTEST => self.start_self_test(),
             ID_LOGS => {
                 if let Some(d) = dirs::data_local_dir().map(|d| d.join("Calamansi")) {
                     let _ = std::fs::create_dir_all(&d);
@@ -1102,6 +1290,7 @@ struct MenuState {
     send_to: bool,
     output: OutputLocation,
     ffmpeg: Option<String>,
+    office: Option<&'static str>,
     busy: bool,
 }
 
@@ -1179,6 +1368,21 @@ fn show_tray_menu(main: HWND) {
                 "FFmpeg not found — how to add audio & video",
             ),
         }
+        match state.office {
+            Some(name) => add(
+                menu,
+                MF_STRING | MF_GRAYED,
+                ID_OFFICE,
+                &format!("Office: {name}"),
+            ),
+            None => add(
+                menu,
+                MF_STRING,
+                ID_OFFICE,
+                "Office not found — how to add Word/Excel",
+            ),
+        }
+        add(menu, MF_STRING | busy, ID_SELFTEST, "Run self-test");
         add(menu, MF_STRING, ID_SETTINGS, "Edit settings file…");
         add(menu, MF_STRING, ID_LOGS, "Open log folder");
         add(menu, MF_STRING, ID_ABOUT, "About Calamansi");
@@ -1305,6 +1509,16 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             }
             let report = *Box::from_raw(l as *mut Report);
             with(move |a| a.on_done(report));
+            0
+        }
+        WM_APP_SELFTEST => {
+            if !available() {
+                PostMessageW(hwnd, WM_APP_SELFTEST, w, l);
+                return 0;
+            }
+            let (dir, checks) =
+                *Box::from_raw(l as *mut (PathBuf, Vec<calamansi_core::selftest::Check>));
+            with(move |a| a.on_self_test(dir, checks));
             0
         }
         WM_APP_PICK => {

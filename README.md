@@ -20,9 +20,10 @@ No account, no upload, no subscription, no telemetry. Files never leave your PC.
 | How | What happens |
 | --- | --- |
 | Shift + drag files | Convert wheel appears under the cursor. Drop on a format. Drop in the centre to cancel. |
-| Ctrl + Shift + drag | Tools wheel (Make PDF, Merge, Split, Resize, Rotate, SHA-256). |
+| Ctrl + Shift + drag | Tools wheel: Make PDF, Collage, Merge, Split, Resize, Compress, Rotate, Flip, Grayscale, Mute, Snapshot, Copy path, SHA-256… (only the tools that fit the selection). |
 | Right-click → Send to → Calamansi | Wheel opens at the cursor; click a format. (Turn on in the tray menu.) |
 | Click the tray icon | Pick files, then pick a format. |
+| Tray → Run self-test | Converts sample files and reports which features work on this PC. |
 | `calamansi-cli` | The same engine on the command line, for scripts. |
 
 Holding Shift normally means "move" in Explorer. Calamansi always answers a drop with *copy*, so your
@@ -30,19 +31,22 @@ originals are never moved or deleted, and outputs never overwrite existing files
 
 ## What it converts
 
-| Area | Built in | With FFmpeg installed |
-| --- | --- | --- |
-| Images | PNG, JPEG, WebP (lossless), GIF, BMP, TIFF, ICO, any image → PDF | HEIC/AVIF input, AVIF output, lossy WebP |
-| Documents | PDF → text, text → PDF, merge, split, images → PDF | |
-| Subtitles | SRT ⇄ VTT, subtitles → text | |
-| Video | | MP4, MOV, MKV, WebM, AVI, video → GIF, extract audio |
-| Audio | | MP3, WAV, M4A, AAC, FLAC, Ogg |
+| Area | Built in | With FFmpeg | With Microsoft Office or LibreOffice |
+| --- | --- | --- | --- |
+| Images | PNG, JPEG, WebP (lossless), GIF, BMP, TIFF, ICO; image → PDF; resize, compress, rotate, flip, grayscale, remove metadata, collage, many images → one PDF | HEIC/AVIF input, AVIF output, lossy WebP | |
+| PDF | PDF → PNG/JPEG/WebP/TIFF (one image per page), PDF → Word, PDF → text, text → PDF; merge, split, rotate, reverse, compress | | PDF → Word through Word itself (keeps layout) |
+| Word, Excel, PowerPoint | Word → text | | DOCX/DOC/ODT/RTF, XLSX/XLS/ODS, PPTX/PPT/ODP → PDF; old formats → DOCX/XLSX/PPTX |
+| Subtitles | SRT ⇄ VTT, subtitles → text | | |
+| Video | | MP4, MOV, MKV, WebM, AVI, → GIF, extract audio; compress, mute, rotate, snapshot | |
+| Audio | | MP3, WAV, M4A, AAC, FLAC, Ogg; normalize loudness, mono | |
+| Any file | Duplicate, copy path, SHA-256 | | |
 
-The wheel only offers routes that work for *every* file in the selection, and hides FFmpeg routes
-when FFmpeg isn't installed. Calamansi never downloads FFmpeg itself. To add audio and video:
+The wheel only offers what works for *every* file in the selection and hides routes whose helper
+program isn't installed. Calamansi never downloads helpers itself. To add them:
 
 ```powershell
-winget install ffmpeg
+winget install ffmpeg                      # audio and video
+winget install TheDocumentFoundation.LibreOffice   # only if you don't have Microsoft Office
 ```
 
 ## Install
@@ -83,6 +87,8 @@ The tray menu covers the common options. Everything else is in
   "drag_wheel": true,
   "excluded_apps": ["CorelDRW.exe"],
   "ffmpeg_path": null,
+  "office_path": null,
+  "pdf_image_dpi": 150,
   "success_dismiss_ms": 2000,
   "ffmpeg_timeout_minutes": 60
 }
@@ -106,7 +112,9 @@ drag API on Windows.
 
 ## Limitations
 
-- No HEIC *output*, no OCR, no Office document conversion, no background removal yet.
+- No HEIC *output*, no OCR, no background removal yet.
+- The built-in PDF → Word keeps the text but not the layout; with Microsoft Word installed, Word does
+  the conversion and keeps the layout.
 - Built-in WebP output is lossless (larger files); lossy WebP needs FFmpeg with libwebp.
 - Images are limited to 100 MB / 40 megapixels; animated images are converted as a single frame.
 - Text → PDF uses a standard PDF font, so characters outside Latin-1 become `?`.

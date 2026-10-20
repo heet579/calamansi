@@ -125,6 +125,28 @@ pub fn to_rgba(img: &DynamicImage) -> RgbaImage {
     img.to_rgba8()
 }
 
+/// Arrange images in a grid on a white background, each scaled to fit a
+/// `cell`-pixel square with a small margin.
+pub fn collage(images: &[DynamicImage], cell: u32) -> DynamicImage {
+    let n = images.len().max(1) as u32;
+    let cols = (n as f32).sqrt().ceil() as u32;
+    let rows = n.div_ceil(cols);
+    let gap = (cell / 40).max(4);
+    let (w, h) = (
+        cols * cell + (cols + 1) * gap,
+        rows * cell + (rows + 1) * gap,
+    );
+    let mut canvas = RgbaImage::from_pixel(w, h, image::Rgba([255, 255, 255, 255]));
+    for (i, img) in images.iter().enumerate() {
+        let (c, r) = (i as u32 % cols, i as u32 / cols);
+        let fitted = img.resize(cell, cell, FilterType::Lanczos3).to_rgba8();
+        let x = gap + c * (cell + gap) + (cell - fitted.width()) / 2;
+        let y = gap + r * (cell + gap) + (cell - fitted.height()) / 2;
+        image::imageops::overlay(&mut canvas, &fitted, i64::from(x), i64::from(y));
+    }
+    DynamicImage::ImageRgba8(canvas)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +205,14 @@ mod tests {
         encode(&img, Format::Ico, 90, &mut buf).unwrap();
         let back = image::load_from_memory(&buf.into_inner()).unwrap();
         assert_eq!((back.width(), back.height()), (256, 128));
+    }
+
+    #[test]
+    fn collage_grid() {
+        let imgs = vec![sample(40, 20), sample(20, 40), sample(30, 30)];
+        let c = collage(&imgs, 100);
+        assert_eq!(c.width(), c.height(), "3 images make a 2x2 grid");
+        assert_eq!(c.to_rgba8().get_pixel(0, 0)[0], 255, "white margin");
     }
 
     #[test]

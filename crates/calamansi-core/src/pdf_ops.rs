@@ -277,6 +277,20 @@ pub fn extract_page(path: &Path, n: u32, out: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
+/// Text of each page, best effort. Scanned pages come back empty.
+pub fn page_texts(path: &Path) -> Result<Vec<String>> {
+    let doc = open(path)?;
+    let pages: Vec<u32> = doc.get_pages().keys().copied().collect();
+    Ok(pages
+        .into_iter()
+        .map(|p| {
+            doc.extract_text(&[p])
+                .map(|t| t.trim_end().to_string())
+                .unwrap_or_default()
+        })
+        .collect())
+}
+
 /// Best-effort text extraction. Scanned PDFs (images only) produce no text.
 pub fn extract_text(path: &Path) -> Result<String> {
     let doc = open(path)?;
@@ -289,6 +303,110 @@ pub fn extract_text(path: &Path) -> Result<String> {
         }
     }
     Ok(text)
+}
+
+/// Longest side of a rendered page, in pixels.
+pub const RENDER_MAX_SIDE: f32 = 4000.0;
+
+/// Render every page to an RGBA image at `dpi` (capped at
+/// [`RENDER_MAX_SIDE`]), calling `each(page_number, image)` in order.
+pub fn render_pages(
+    path: &Path,
+    dpi: f32,
+    cancel: &std::sync::atomic::AtomicBool,
+    mut each: impl FnMut(usize, image::DynamicImage) -> Result<()>,
+) -> Result<()> {
+    use hayro::hayro_interpret::InterpreterSettings;
+    use hayro::hayro_syntax::Pdf;
+    use hayro::vello_cpu::color::palette::css::WHITE;
+    use hayro::{render, PixmapSettings, RenderCache, RenderSettings};
+
+    image_ops::check_size(path)?;
+    let data = std::fs::read(path)?;
+    let pdf =
+        Pdf::new(data).map_err(|e| CoreError::Pdf(format!("couldn't read this PDF ({e:?})")))?;
+    let cache = RenderCache::new();
+    let interpreter = InterpreterSettings::default();
+    let pages = pdf.pages();
+    if pages.is_empty() {
+        return Err(CoreError::Pdf("the PDF has no pages".into()));
+    }
+    for (i, page) in pages.iter().enumerate() {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(CoreError::Cancelled);
+        }
+        let (w, h) = page.render_dimensions();
+        let mut scale = dpi / 72.0;
+        let longest = w.max(h) * scale;
+        if longest > RENDER_MAX_SIDE {
+            scale *= RENDER_MAX_SIDE / longest;
+        }
+        let settings = PixmapSettings {
+            x_scale: scale,
+            y_scale: scale,
+            bg_color: WHITE,
+        };
+        let pixmap = render(
+            page,
+            &cache,
+            &interpreter,
+            &RenderSettings::default(),
+            &settings,
+        );
+        let png = pixmap
+            .into_png()
+            .map_err(|e| CoreError::Pdf(format!("couldn't render page {} ({e:?})", i + 1)))?;
+        let img = image::load_from_memory(&png)?;
+        each(i + 1, img)?;
+    }
+    Ok(())
+}
+
+/// Rotate every page clockwise by `degrees` (a multiple of 90).
+pub fn rotate_pages(path: &Path, degrees: i64, out: &mut impl Write) -> Result<()> {
+    let mut doc = open(path)?;
+    let pages: Vec<ObjectId> = doc.get_pages().into_values().collect();
+    for id in pages {
+        let current = resolved_page(&doc, id)?
+            .get(b"Rotate")
+            .ok()
+            .and_then(|o| o.as_i64().ok())
+            .unwrap_or(0);
+        if let Ok(Object::Dictionary(d)) = doc.get_object_mut(id) {
+            d.set("Rotate", (current + degrees).rem_euclid(360));
+        }
+    }
+    doc.save_to(out)?;
+    Ok(())
+}
+
+/// Write the pages in reverse order.
+pub fn reverse_pages(path: &Path, out: &mut impl Write) -> Result<()> {
+    let doc = open(path)?;
+    let mut page_ids: Vec<ObjectId> = doc.get_pages().into_values().collect();
+    page_ids.reverse();
+    let mut resolved = Vec::new();
+    for id in &page_ids {
+        resolved.push((*id, resolved_page(&doc, *id)?));
+    }
+    let mut doc = doc;
+    let pages_id = doc.new_object_id();
+    for (id, mut dict) in resolved {
+        dict.set("Parent", pages_id);
+        doc.objects.insert(id, Object::Dictionary(dict));
+    }
+    let kids = page_ids.into_iter().map(Object::from).collect();
+    finish(doc, pages_id, kids, out)
+}
+
+/// Re-save with compressed streams and unused objects removed.
+pub fn compress(path: &Path, out: &mut impl Write) -> Result<()> {
+    let mut doc = open(path)?;
+    doc.prune_objects();
+    doc.delete_zero_length_streams();
+    doc.compress();
+    doc.save_to(out)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -334,6 +452,49 @@ mod tests {
         write(&merged, |w| merge(&[&one, &text], w));
         assert_eq!(page_count(&merged).unwrap(), 5);
         assert!(extract_text(&merged).unwrap().contains("Hello Calamansi"));
+
+        let rotated = d.join("rot.pdf");
+        write(&rotated, |w| rotate_pages(&merged, 90, w));
+        let doc = Document::load(&rotated).unwrap();
+        let first = *doc.get_pages().values().next().unwrap();
+        assert_eq!(
+            resolved_page(&doc, first)
+                .unwrap()
+                .get(b"Rotate")
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            90
+        );
+
+        let reversed = d.join("rev.pdf");
+        write(&reversed, |w| reverse_pages(&merged, w));
+        assert_eq!(page_count(&reversed).unwrap(), 5);
+        let rev = Document::load(&reversed).unwrap();
+        let first = *rev.get_pages().values().next().unwrap();
+        assert!(
+            rev.extract_text(&[1]).unwrap().contains("line"),
+            "text page now first"
+        );
+        let _ = first;
+
+        let small = d.join("small.pdf");
+        write(&small, |w| compress(&merged, w));
+        assert_eq!(page_count(&small).unwrap(), 5);
+
+        let mut rendered = Vec::new();
+        render_pages(
+            &text,
+            72.0,
+            &std::sync::atomic::AtomicBool::new(false),
+            |n, img| {
+                rendered.push((n, img.width(), img.height()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(rendered.len(), 3);
+        assert_eq!((rendered[0].1, rendered[0].2), (595, 842));
 
         let page3 = d.join("p3.pdf");
         write(&page3, |w| extract_page(&merged, 3, w));

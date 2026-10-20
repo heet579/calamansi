@@ -3,15 +3,18 @@
 //! Each input gets its own result: one failure never stops the others.
 
 use crate::checksum;
+use crate::docx;
 use crate::error::{CoreError, Result};
-use crate::format::{self, Format, Kind};
+use crate::format::{self, Format, Kind, OfficeFamily};
 use crate::image_ops;
-use crate::media::Ffmpeg;
+use crate::media::{Ffmpeg, MediaTool};
 use crate::naming;
+use crate::office::Office;
 use crate::pdf_ops;
-use crate::routes::{self, Engine};
+use crate::routes::{self, Available, Engine};
 use crate::settings::Settings;
 use crate::subtitles;
+use image::DynamicImage;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -20,11 +23,28 @@ use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
+    // One output from the whole selection.
     ImagesToPdf,
+    Collage,
     MergePdf,
-    SplitPdf,
+    // Images.
     Resize,
+    CompressImage,
     RotateRight,
+    RotateLeft,
+    Flip,
+    Grayscale,
+    StripMetadata,
+    // PDFs.
+    SplitPdf,
+    RotatePdf,
+    ReversePdf,
+    CompressPdf,
+    // Audio and video (FFmpeg).
+    Media(MediaTool),
+    // Any file.
+    Duplicate,
+    CopyPath,
     Sha256,
 }
 
@@ -32,38 +52,101 @@ impl Tool {
     pub fn label(self) -> &'static str {
         match self {
             Tool::ImagesToPdf => "Make PDF",
+            Tool::Collage => "Collage",
             Tool::MergePdf => "Merge",
-            Tool::SplitPdf => "Split",
             Tool::Resize => "Resize",
-            Tool::RotateRight => "Rotate",
+            Tool::CompressImage => "Compress",
+            Tool::RotateRight => "Rotate \u{21bb}",
+            Tool::RotateLeft => "Rotate \u{21ba}",
+            Tool::Flip => "Flip",
+            Tool::Grayscale => "Grayscale",
+            Tool::StripMetadata => "No metadata",
+            Tool::SplitPdf => "Split",
+            Tool::RotatePdf => "Rotate",
+            Tool::ReversePdf => "Reverse",
+            Tool::CompressPdf => "Compress",
+            Tool::Media(MediaTool::CompressVideo) => "Compress",
+            Tool::Media(MediaTool::Mute) => "Mute",
+            Tool::Media(MediaTool::Snapshot) => "Snapshot",
+            Tool::Media(MediaTool::RotateVideo) => "Rotate",
+            Tool::Media(MediaTool::Normalize) => "Normalize",
+            Tool::Media(MediaTool::Mono) => "Mono",
+            Tool::Duplicate => "Duplicate",
+            Tool::CopyPath => "Copy path",
             Tool::Sha256 => "SHA-256",
         }
     }
 
     /// Whether this tool makes sense for the selection.
-    pub fn applies_to(self, inputs: &[Format]) -> bool {
-        let all = |pred: fn(Format) -> bool| !inputs.is_empty() && inputs.iter().all(|&f| pred(f));
-        let native_image = |f: Format| routes::route(f, Format::Pdf) == Some(Engine::Native);
+    pub fn applies_to(self, inputs: &[Format], available: Available) -> bool {
+        if inputs.is_empty() {
+            return false;
+        }
+        let all = |pred: fn(Format) -> bool| inputs.iter().all(|&f| pred(f));
+        let image = |f: Format| routes::native_image_in(f);
+        let pdf = |f: Format| f == Format::Pdf;
+        let video = |f: Format| f.kind() == Kind::Video;
+        let audio = |f: Format| f.kind() == Kind::Audio;
         match self {
-            Tool::ImagesToPdf => all(native_image),
-            Tool::MergePdf => inputs.len() >= 2 && all(|f| f == Format::Pdf),
-            Tool::SplitPdf => all(|f| f == Format::Pdf),
-            Tool::Resize | Tool::RotateRight => all(native_image),
-            Tool::Sha256 => !inputs.is_empty(),
+            Tool::ImagesToPdf => all(image),
+            Tool::Collage => inputs.len() >= 2 && all(image),
+            Tool::MergePdf => inputs.len() >= 2 && all(pdf),
+            Tool::Resize
+            | Tool::CompressImage
+            | Tool::RotateRight
+            | Tool::RotateLeft
+            | Tool::Flip
+            | Tool::Grayscale
+            | Tool::StripMetadata => all(image),
+            Tool::SplitPdf | Tool::RotatePdf | Tool::ReversePdf | Tool::CompressPdf => all(pdf),
+            Tool::Media(m) => {
+                available.ffmpeg
+                    && match m {
+                        MediaTool::CompressVideo
+                        | MediaTool::Mute
+                        | MediaTool::Snapshot
+                        | MediaTool::RotateVideo => all(video),
+                        MediaTool::Normalize | MediaTool::Mono => all(audio),
+                    }
+            }
+            Tool::Duplicate | Tool::CopyPath | Tool::Sha256 => true,
         }
     }
 
     /// Tools that produce one output from the whole selection.
     pub fn is_aggregate(self) -> bool {
-        matches!(self, Tool::ImagesToPdf | Tool::MergePdf)
+        matches!(self, Tool::ImagesToPdf | Tool::Collage | Tool::MergePdf)
     }
 
+    /// Tools whose result is text for the clipboard rather than files.
+    pub fn is_value(self) -> bool {
+        matches!(self, Tool::CopyPath | Tool::Sha256)
+    }
+
+    /// Wheel order: specific tools first, generic file actions last.
     pub const ALL: &'static [Tool] = &[
         Tool::ImagesToPdf,
+        Tool::Collage,
         Tool::MergePdf,
-        Tool::SplitPdf,
         Tool::Resize,
+        Tool::CompressImage,
         Tool::RotateRight,
+        Tool::RotateLeft,
+        Tool::Flip,
+        Tool::Grayscale,
+        Tool::StripMetadata,
+        Tool::SplitPdf,
+        Tool::RotatePdf,
+        Tool::ReversePdf,
+        Tool::CompressPdf,
+        Tool::Media(MediaTool::CompressVideo),
+        Tool::Media(MediaTool::Mute),
+        Tool::Media(MediaTool::Snapshot),
+        Tool::Media(MediaTool::RotateVideo),
+        Tool::Media(MediaTool::Normalize),
+        Tool::Media(MediaTool::Mono),
+        Tool::Duplicate,
+        Tool::CopyPath,
         Tool::Sha256,
     ];
 }
@@ -74,11 +157,20 @@ pub enum Action {
     Tool(Tool),
 }
 
+impl Action {
+    pub fn label(self) -> String {
+        match self {
+            Action::Convert(f) => format!("Convert to {f}"),
+            Action::Tool(t) => t.label().to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     /// Files written.
     Done(Vec<PathBuf>),
-    /// A computed value (e.g. a checksum), nothing written.
+    /// A computed value (a checksum, a path), nothing written.
     Value(String),
     Skipped(String),
     Failed(String),
@@ -141,7 +233,21 @@ pub struct Progress {
 pub struct Context<'a> {
     pub settings: &'a Settings,
     pub ffmpeg: Option<&'a Ffmpeg>,
+    pub office: Option<&'a Office>,
     pub cancel: &'a AtomicBool,
+}
+
+impl Context<'_> {
+    pub fn available(&self) -> Available {
+        Available {
+            ffmpeg: self.ffmpeg.is_some(),
+            office: self.office.is_some(),
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(u64::from(self.settings.ffmpeg_timeout_minutes) * 60)
+    }
 }
 
 /// Run `action` over `inputs`, reporting progress after each file.
@@ -167,11 +273,21 @@ pub fn run(
         }
     }
 
-    // FFmpeg is already multi-threaded; native work parallelises per file.
-    let uses_ffmpeg = matches!(action, Action::Convert(to) if inputs.iter().any(|p| {
-        format::detect(p).and_then(|f| routes::route(f, to)) == Some(Engine::Ffmpeg)
-    }));
-    let workers = if uses_ffmpeg {
+    // Helper programs run one at a time (FFmpeg is already multi-threaded;
+    // Office automation must not run concurrently). Native work parallelises.
+    let external = match action {
+        Action::Convert(to) => {
+            inputs.iter().any(|p| {
+                !matches!(
+                    format::detect(p).and_then(|f| routes::route(f, to)),
+                    Some(Engine::Native) | None
+                )
+            }) || (to == Format::Docx && cx.office.is_some_and(Office::word_reads_pdf))
+        }
+        Action::Tool(Tool::Media(_)) => true,
+        Action::Tool(_) => false,
+    };
+    let workers = if external {
         1
     } else {
         std::thread::available_parallelism()
@@ -229,17 +345,11 @@ fn run_one(action: Action, input: &Path, cx: &Context) -> Outcome {
                 Err(e) => Outcome::Failed(e.to_string()),
             }
         }
-        Action::Tool(Tool::SplitPdf) => split(input, cx),
-        Action::Tool(Tool::Resize) => edit_image(input, cx, "resized", |img| {
-            Ok(image_ops::fit_within(&img, cx.settings.resize_max_side))
-        }),
-        Action::Tool(Tool::RotateRight) => {
-            edit_image(input, cx, "rotated", |img| image_ops::rotate(&img, 90))
+        Action::Tool(Tool::CopyPath) => {
+            let abs = std::path::absolute(input).unwrap_or_else(|_| input.to_path_buf());
+            return Outcome::Value(abs.display().to_string());
         }
-        Action::Tool(t) => Err(CoreError::InvalidInput(format!(
-            "{} runs on the whole selection",
-            t.label()
-        ))),
+        Action::Tool(t) => tool(t, input, cx),
     };
     match result {
         Ok(Some(paths)) => Outcome::Done(paths),
@@ -266,6 +376,28 @@ fn produce(
     }
 }
 
+/// Like [`produce`], for helper programs that write a file themselves.
+fn produce_external(
+    dir: &Path,
+    stem: &str,
+    ext: &str,
+    write: impl FnOnce(&Path) -> Result<()>,
+) -> Result<PathBuf> {
+    produce(dir, stem, ext, |out| {
+        let tmp = naming::external_temp(out);
+        let r = write(&tmp).and_then(|_| Ok(naming::commit_external(&tmp, out)?));
+        if r.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        r
+    })
+}
+
+fn read_text(input: &Path) -> Result<String> {
+    image_ops::check_size(input)?;
+    Ok(String::from_utf8_lossy(&std::fs::read(input)?).into_owned())
+}
+
 fn convert(input: &Path, to: Format, cx: &Context) -> Result<Option<Vec<PathBuf>>> {
     let from = format::detect(input).ok_or(CoreError::UnknownFormat)?;
     if from == to {
@@ -276,21 +408,51 @@ fn convert(input: &Path, to: Format, cx: &Context) -> Result<Option<Vec<PathBuf>
     let stem = naming::stem_of(input);
     let quality = cx.settings.quality;
 
+    // PDF pages to pictures: one image per page.
+    if from == Format::Pdf && to.kind() == Kind::Image {
+        return pdf_to_images(input, to, cx).map(Some);
+    }
+
+    // PDF → Word: Word itself gives a faithful, editable result when installed.
+    if from == Format::Pdf && to == Format::Docx {
+        if let Some(office) = cx.office.filter(|o| o.word_reads_pdf()) {
+            let via_word = produce_external(&dir, &stem, "docx", |tmp| {
+                office.convert(
+                    input,
+                    OfficeFamily::Text,
+                    Format::Docx,
+                    tmp,
+                    cx.cancel,
+                    cx.timeout(),
+                )
+            });
+            match via_word {
+                Ok(p) => return Ok(Some(vec![p])),
+                Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
+                Err(_) => {} // fall back to the built-in text conversion
+            }
+        }
+    }
+
     let out = match engine {
         Engine::Ffmpeg => {
             let ff = cx.ffmpeg.ok_or(CoreError::FfmpegMissing)?;
-            produce(&dir, &stem, to.extension(), |out| {
-                let tmp = naming::external_temp(out);
-                let args = ff.args(from, to, input, &tmp, quality)?;
-                let timeout =
-                    Duration::from_secs(u64::from(cx.settings.ffmpeg_timeout_minutes) * 60);
-                let r = ff
-                    .run(&args, cx.cancel, timeout)
-                    .and_then(|_| Ok(naming::commit_external(&tmp, out)?));
-                if r.is_err() {
-                    let _ = std::fs::remove_file(&tmp);
-                }
-                r
+            produce_external(&dir, &stem, to.extension(), |tmp| {
+                let args = ff.args(from, to, input, tmp, quality)?;
+                ff.run(&args, cx.cancel, cx.timeout())
+            })?
+        }
+        Engine::Office => {
+            let office = cx.office.ok_or_else(|| {
+                CoreError::InvalidInput(
+                    "this needs Microsoft Office or LibreOffice, which wasn't found".into(),
+                )
+            })?;
+            let family = from
+                .office_family()
+                .ok_or(CoreError::Unsupported { from, to })?;
+            produce_external(&dir, &stem, to.extension(), |tmp| {
+                office.convert(input, family, to, tmp, cx.cancel, cx.timeout())
             })?
         }
         Engine::Native => produce(&dir, &stem, to.extension(), |out| {
@@ -314,17 +476,98 @@ fn native_convert(
             image_ops::encode(&img, to, quality, w)
         }
         (Kind::Document, Format::Txt) => Ok(w.write_all(pdf_ops::extract_text(input)?.as_bytes())?),
-        (Kind::Document, Format::Pdf) => {
+        (Kind::Document, Format::Pdf) => pdf_ops::text_to_pdf(&read_text(input)?, w),
+        (Kind::Document, Format::Docx) => {
+            let pages = if from == Format::Pdf {
+                pdf_ops::page_texts(input)?
+            } else {
+                vec![read_text(input)?]
+            };
+            docx::write(&pages, w)
+        }
+        (Kind::Office, Format::Txt) => {
             image_ops::check_size(input)?;
-            let text = String::from_utf8_lossy(&std::fs::read(input)?).into_owned();
-            pdf_ops::text_to_pdf(&text, w)
+            let text = docx::read_text(std::fs::File::open(input)?)?;
+            Ok(w.write_all(text.as_bytes())?)
         }
         (Kind::Subtitle, _) => {
-            image_ops::check_size(input)?;
-            let text = String::from_utf8_lossy(&std::fs::read(input)?).into_owned();
-            Ok(w.write_all(subtitles::convert(&text, to)?.as_bytes())?)
+            Ok(w.write_all(subtitles::convert(&read_text(input)?, to)?.as_bytes())?)
         }
         _ => Err(CoreError::Unsupported { from, to }),
+    }
+}
+
+fn pdf_to_images(input: &Path, to: Format, cx: &Context) -> Result<Vec<PathBuf>> {
+    let dir = cx.settings.output.resolve(input);
+    let stem = naming::stem_of(input);
+    let pages = pdf_ops::page_count(input).unwrap_or(0);
+    let mut outs: Vec<PathBuf> = Vec::new();
+    let result = pdf_ops::render_pages(
+        input,
+        cx.settings.pdf_image_dpi as f32,
+        cx.cancel,
+        |n, img| {
+            let name = if pages == 1 {
+                stem.clone()
+            } else {
+                format!("{stem} page {n}")
+            };
+            let out = produce(&dir, &name, to.extension(), |out| {
+                naming::write_atomically(out, |w| {
+                    image_ops::encode(&img, to, cx.settings.quality, w)
+                })
+            })?;
+            outs.push(out);
+            Ok(())
+        },
+    );
+    if let Err(e) = result {
+        for o in &outs {
+            naming::release(o);
+        }
+        return Err(e);
+    }
+    Ok(outs)
+}
+
+fn tool(t: Tool, input: &Path, cx: &Context) -> Result<Option<Vec<PathBuf>>> {
+    let max = cx.settings.resize_max_side;
+    match t {
+        Tool::Resize => edit_image(input, cx, "resized", None, |img| {
+            Ok(image_ops::fit_within(&img, max))
+        }),
+        Tool::CompressImage => edit_image(input, cx, "compressed", Some(Format::Jpeg), |img| {
+            Ok(image_ops::fit_within(&img, 2560))
+        }),
+        Tool::RotateRight => edit_image(input, cx, "rotated", None, |img| {
+            image_ops::rotate(&img, 90)
+        }),
+        Tool::RotateLeft => edit_image(input, cx, "rotated", None, |img| {
+            image_ops::rotate(&img, 270)
+        }),
+        Tool::Flip => edit_image(input, cx, "flipped", None, |img| Ok(img.fliph())),
+        Tool::Grayscale => edit_image(input, cx, "grayscale", None, |img| Ok(img.grayscale())),
+        Tool::StripMetadata => edit_image(input, cx, "clean", None, Ok),
+        Tool::SplitPdf => split(input, cx),
+        Tool::RotatePdf => edit_pdf(input, cx, "rotated", |w| {
+            pdf_ops::rotate_pages(input, 90, w)
+        }),
+        Tool::ReversePdf => edit_pdf(input, cx, "reversed", |w| pdf_ops::reverse_pages(input, w)),
+        Tool::CompressPdf => edit_pdf(input, cx, "compressed", |w| pdf_ops::compress(input, w)),
+        Tool::Media(m) => media_tool(m, input, cx),
+        Tool::Duplicate => {
+            let dir = input.parent().unwrap_or(Path::new("."));
+            let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let stem = format!("{} copy", naming::stem_of(input));
+            let out = produce_external(dir, &stem, ext, |tmp| {
+                std::fs::copy(input, tmp)?;
+                Ok(())
+            })?;
+            Ok(Some(vec![out]))
+        }
+        Tool::ImagesToPdf | Tool::Collage | Tool::MergePdf | Tool::CopyPath | Tool::Sha256 => Err(
+            CoreError::InvalidInput(format!("{} isn't a per-file tool", t.label())),
+        ),
     }
 }
 
@@ -332,21 +575,60 @@ fn edit_image(
     input: &Path,
     cx: &Context,
     suffix: &str,
-    edit: impl FnOnce(image::DynamicImage) -> Result<image::DynamicImage>,
+    out_format: Option<Format>,
+    edit: impl FnOnce(DynamicImage) -> Result<DynamicImage>,
 ) -> Result<Option<Vec<PathBuf>>> {
     let from = format::detect(input).ok_or(CoreError::UnknownFormat)?;
-    if routes::route(from, Format::Pdf) != Some(Engine::Native) {
+    if !routes::native_image_in(from) {
         return Err(CoreError::InvalidInput(format!(
             "{from} files can't be edited yet"
         )));
     }
+    let to = out_format.unwrap_or(from);
+    let quality = if out_format == Some(Format::Jpeg) {
+        70
+    } else {
+        cx.settings.quality.max(90)
+    };
     let img = edit(image_ops::load(input)?)?;
     let dir = cx.settings.output.resolve(input);
     let stem = format!("{} {suffix}", naming::stem_of(input));
-    let out = produce(&dir, &stem, from.extension(), |out| {
-        naming::write_atomically(out, |w| {
-            image_ops::encode(&img, from, cx.settings.quality, w)
-        })
+    let out = produce(&dir, &stem, to.extension(), |out| {
+        naming::write_atomically(out, |w| image_ops::encode(&img, to, quality, w))
+    })?;
+    Ok(Some(vec![out]))
+}
+
+fn edit_pdf(
+    input: &Path,
+    cx: &Context,
+    suffix: &str,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<()>,
+) -> Result<Option<Vec<PathBuf>>> {
+    let dir = cx.settings.output.resolve(input);
+    let stem = format!("{} {suffix}", naming::stem_of(input));
+    let out = produce(&dir, &stem, "pdf", |out| {
+        naming::write_atomically(out, write)
+    })?;
+    Ok(Some(vec![out]))
+}
+
+fn media_tool(m: MediaTool, input: &Path, cx: &Context) -> Result<Option<Vec<PathBuf>>> {
+    let ff = cx.ffmpeg.ok_or(CoreError::FfmpegMissing)?;
+    let from = format::detect(input).ok_or(CoreError::UnknownFormat)?;
+    let (suffix, ext) = match m {
+        MediaTool::CompressVideo => ("compressed", "mp4"),
+        MediaTool::Mute => ("muted", from.extension()),
+        MediaTool::Snapshot => ("frame", "png"),
+        MediaTool::RotateVideo => ("rotated", "mp4"),
+        MediaTool::Normalize => ("normalized", from.extension()),
+        MediaTool::Mono => ("mono", from.extension()),
+    };
+    let dir = cx.settings.output.resolve(input);
+    let stem = format!("{} {suffix}", naming::stem_of(input));
+    let out = produce_external(&dir, &stem, ext, |tmp| {
+        let args = ff.tool_args(m, from, input, tmp)?;
+        ff.run(&args, cx.cancel, cx.timeout())
     })?;
     Ok(Some(vec![out]))
 }
@@ -384,6 +666,19 @@ fn aggregate(tool: Tool, inputs: &[PathBuf], cx: &Context) -> Result<PathBuf> {
                 pdf_ops::images_to_pdf(&refs, cx.settings.quality, w)
             })
         }),
+        Tool::Collage => {
+            let mut images = Vec::with_capacity(inputs.len());
+            for p in inputs {
+                if cx.cancel.load(Ordering::Relaxed) {
+                    return Err(CoreError::Cancelled);
+                }
+                images.push(image_ops::fit_within(&image_ops::load(p)?, 1200));
+            }
+            let img = image_ops::collage(&images, 600);
+            produce(&dir, &format!("{stem} collage"), "jpg", |out| {
+                naming::write_atomically(out, |w| image_ops::encode(&img, Format::Jpeg, 90, w))
+            })
+        }
         Tool::MergePdf => produce(&dir, &format!("{stem} merged"), "pdf", |out| {
             naming::write_atomically(out, |w| pdf_ops::merge(&refs, w))
         }),
@@ -398,7 +693,7 @@ fn aggregate(tool: Tool, inputs: &[PathBuf], cx: &Context) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::settings::OutputLocation;
-    use image::{DynamicImage, Rgba, RgbaImage};
+    use image::{Rgba, RgbaImage};
 
     fn pngs(dir: &Path, n: usize) -> Vec<PathBuf> {
         (0..n)
@@ -420,7 +715,15 @@ mod tests {
         Context {
             settings,
             ffmpeg: None,
+            office: None,
             cancel,
+        }
+    }
+
+    fn no_leftovers(dir: &Path) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let name = e.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(!name.contains("calamansi"), "leftover {name}");
         }
     }
 
@@ -453,18 +756,108 @@ mod tests {
         for out in report.outputs() {
             assert_eq!(format::detect(out), Some(Format::Jpeg));
         }
-        // No temp or placeholder files left behind.
-        let leftovers = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter(|e| {
-                e.as_ref()
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .contains("calamansi")
-            })
-            .count();
-        assert_eq!(leftovers, 0);
+        no_leftovers(dir.path());
+    }
+
+    #[test]
+    fn image_to_pdf_and_back_to_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let inputs = pngs(dir.path(), 2);
+        let settings = Settings::default();
+        let cancel = AtomicBool::new(false);
+        let cx = ctx(&settings, &cancel);
+
+        let r = run(Action::Convert(Format::Pdf), &inputs, &cx, &|_| {});
+        assert_eq!(r.outputs().len(), 2, "one PDF per image");
+        let pdf = r.outputs()[0].to_path_buf();
+        assert_eq!(format::detect(&pdf), Some(Format::Pdf));
+        assert_eq!(pdf.file_name().unwrap(), "img0.pdf");
+
+        let r = run(
+            Action::Convert(Format::Png),
+            std::slice::from_ref(&pdf),
+            &cx,
+            &|_| {},
+        );
+        assert!(r.failures().is_empty(), "{:?}", r.failures());
+        let png = r.outputs()[0];
+        assert_eq!(
+            png.file_name().unwrap(),
+            "img0 (2).png",
+            "never overwrites the original image"
+        );
+        assert_eq!(format::detect(png), Some(Format::Png));
+
+        let r = run(
+            Action::Convert(Format::Jpeg),
+            std::slice::from_ref(&pdf),
+            &cx,
+            &|_| {},
+        );
+        assert_eq!(format::detect(r.outputs()[0]), Some(Format::Jpeg));
+        no_leftovers(dir.path());
+    }
+
+    #[test]
+    fn text_pdf_word_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let txt = dir.path().join("notes.txt");
+        std::fs::write(&txt, "Quarterly notes\nSecond line\n").unwrap();
+        let settings = Settings::default();
+        let cancel = AtomicBool::new(false);
+        let cx = ctx(&settings, &cancel);
+
+        let r = run(
+            Action::Convert(Format::Pdf),
+            std::slice::from_ref(&txt),
+            &cx,
+            &|_| {},
+        );
+        let pdf = r.outputs()[0].to_path_buf();
+
+        let r = run(
+            Action::Convert(Format::Docx),
+            std::slice::from_ref(&pdf),
+            &cx,
+            &|_| {},
+        );
+        let docx = r.outputs()[0].to_path_buf();
+        assert_eq!(docx.extension().unwrap(), "docx");
+        assert_eq!(format::detect(&docx), Some(Format::Docx));
+
+        let r = run(
+            Action::Convert(Format::Txt),
+            std::slice::from_ref(&docx),
+            &cx,
+            &|_| {},
+        );
+        let text = std::fs::read_to_string(r.outputs()[0]).unwrap();
+        assert!(text.contains("Quarterly notes"), "{text}");
+
+        let r = run(
+            Action::Convert(Format::Docx),
+            std::slice::from_ref(&txt),
+            &cx,
+            &|_| {},
+        );
+        assert!(r.failures().is_empty());
+    }
+
+    #[test]
+    fn office_route_without_office_fails_clearly() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("report.xlsx");
+        std::fs::write(&p, b"PK\x03\x04").unwrap();
+        let settings = Settings::default();
+        let cancel = AtomicBool::new(false);
+        let r = run(
+            Action::Convert(Format::Pdf),
+            &[p],
+            &ctx(&settings, &cancel),
+            &|_| {},
+        );
+        assert!(r.failures()[0].1.contains("Office"), "{:?}", r.failures());
+        no_leftovers(dir.path());
     }
 
     #[test]
@@ -494,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn tools() {
+    fn image_tools() {
         let dir = tempfile::tempdir().unwrap();
         let inputs = pngs(dir.path(), 3);
         let settings = Settings {
@@ -505,8 +898,45 @@ mod tests {
         let cx = ctx(&settings, &cancel);
 
         let r = run(Action::Tool(Tool::ImagesToPdf), &inputs, &cx, &|_| {});
-        let pdf = r.outputs()[0].to_path_buf();
-        assert_eq!(pdf_ops::page_count(&pdf).unwrap(), 3);
+        assert_eq!(pdf_ops::page_count(r.outputs()[0]).unwrap(), 3);
+
+        let r = run(Action::Tool(Tool::Collage), &inputs, &cx, &|_| {});
+        assert_eq!(format::detect(r.outputs()[0]), Some(Format::Jpeg));
+
+        let r = run(Action::Tool(Tool::Resize), &inputs[..1], &cx, &|_| {});
+        assert_eq!(image::open(r.outputs()[0]).unwrap().width(), 16);
+
+        let r = run(Action::Tool(Tool::RotateLeft), &inputs[..1], &cx, &|_| {});
+        assert_eq!(image::open(r.outputs()[0]).unwrap().width(), 20);
+
+        for t in [
+            Tool::Flip,
+            Tool::Grayscale,
+            Tool::StripMetadata,
+            Tool::RotateRight,
+        ] {
+            let r = run(Action::Tool(t), &inputs[..1], &cx, &|_| {});
+            assert_eq!(format::detect(r.outputs()[0]), Some(Format::Png), "{t:?}");
+        }
+        let r = run(
+            Action::Tool(Tool::CompressImage),
+            &inputs[..1],
+            &cx,
+            &|_| {},
+        );
+        assert_eq!(format::detect(r.outputs()[0]), Some(Format::Jpeg));
+        no_leftovers(dir.path());
+    }
+
+    #[test]
+    fn pdf_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let inputs = pngs(dir.path(), 3);
+        let settings = Settings::default();
+        let cancel = AtomicBool::new(false);
+        let cx = ctx(&settings, &cancel);
+        let pdf =
+            run(Action::Tool(Tool::ImagesToPdf), &inputs, &cx, &|_| {}).outputs()[0].to_path_buf();
 
         let r = run(
             Action::Tool(Tool::SplitPdf),
@@ -515,22 +945,116 @@ mod tests {
             &|_| {},
         );
         assert_eq!(r.outputs().len(), 3);
-
         let r = run(
             Action::Tool(Tool::MergePdf),
-            &[pdf.clone(), pdf],
+            &[pdf.clone(), pdf.clone()],
             &cx,
             &|_| {},
         );
         assert_eq!(pdf_ops::page_count(r.outputs()[0]).unwrap(), 6);
+        for t in [Tool::RotatePdf, Tool::ReversePdf, Tool::CompressPdf] {
+            let r = run(Action::Tool(t), std::slice::from_ref(&pdf), &cx, &|_| {});
+            assert!(r.failures().is_empty(), "{t:?} {:?}", r.failures());
+            assert_eq!(pdf_ops::page_count(r.outputs()[0]).unwrap(), 3, "{t:?}");
+        }
+        let r = run(
+            Action::Convert(Format::Png),
+            std::slice::from_ref(&pdf),
+            &cx,
+            &|_| {},
+        );
+        assert_eq!(r.outputs().len(), 3, "one image per page");
+        assert!(r.outputs()[1].to_string_lossy().contains("page 2"));
+    }
 
-        let r = run(Action::Tool(Tool::Resize), &inputs[..1], &cx, &|_| {});
-        let img = image::open(r.outputs()[0]).unwrap();
-        assert_eq!(img.width(), 16);
-        assert!(r.outputs()[0].to_string_lossy().contains("resized"));
-
+    #[test]
+    fn file_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        let inputs = pngs(dir.path(), 2);
+        let settings = Settings::default();
+        let cancel = AtomicBool::new(false);
+        let cx = ctx(&settings, &cancel);
         let r = run(Action::Tool(Tool::Sha256), &inputs, &cx, &|_| {});
-        assert_eq!(r.values().len(), 3);
+        assert_eq!(r.values().len(), 2);
+        let r = run(Action::Tool(Tool::CopyPath), &inputs, &cx, &|_| {});
+        assert!(r.values()[0].1.ends_with("img0.png"));
+        let r = run(Action::Tool(Tool::Duplicate), &inputs[..1], &cx, &|_| {});
+        assert_eq!(r.outputs()[0].file_name().unwrap(), "img0 copy.png");
+        assert_eq!(
+            std::fs::read(r.outputs()[0]).unwrap(),
+            std::fs::read(&inputs[0]).unwrap()
+        );
+        no_leftovers(dir.path());
+    }
+
+    #[test]
+    fn media_tools_with_ffmpeg_if_installed() {
+        let Some(ff) = Ffmpeg::locate(None) else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("clip.mp4");
+        let ok = std::process::Command::new(&ff.path)
+            .args([
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=2:size=160x120:rate=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=duration=2",
+                "-shortest",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let settings = Settings::default();
+        let cancel = AtomicBool::new(false);
+        let cx = Context {
+            settings: &settings,
+            ffmpeg: Some(&ff),
+            office: None,
+            cancel: &cancel,
+        };
+        for m in [
+            MediaTool::CompressVideo,
+            MediaTool::Mute,
+            MediaTool::Snapshot,
+            MediaTool::RotateVideo,
+        ] {
+            let r = run(
+                Action::Tool(Tool::Media(m)),
+                std::slice::from_ref(&clip),
+                &cx,
+                &|_| {},
+            );
+            assert!(r.failures().is_empty(), "{m:?}: {:?}", r.failures());
+        }
+        let wav = run(
+            Action::Convert(Format::Wav),
+            std::slice::from_ref(&clip),
+            &cx,
+            &|_| {},
+        )
+        .outputs()[0]
+            .to_path_buf();
+        for m in [MediaTool::Normalize, MediaTool::Mono] {
+            let r = run(
+                Action::Tool(Tool::Media(m)),
+                std::slice::from_ref(&wav),
+                &cx,
+                &|_| {},
+            );
+            assert!(r.failures().is_empty(), "{m:?}: {:?}", r.failures());
+        }
+        no_leftovers(dir.path());
     }
 
     #[test]
@@ -567,10 +1091,15 @@ mod tests {
     #[test]
     fn tool_applicability() {
         use Format::*;
-        assert!(Tool::MergePdf.applies_to(&[Pdf, Pdf]));
-        assert!(!Tool::MergePdf.applies_to(&[Pdf]));
-        assert!(Tool::ImagesToPdf.applies_to(&[Png, Jpeg]));
-        assert!(!Tool::ImagesToPdf.applies_to(&[Png, Heic]));
-        assert!(Tool::Sha256.applies_to(&[Mp4]));
+        let none = Available::NONE;
+        assert!(Tool::MergePdf.applies_to(&[Pdf, Pdf], none));
+        assert!(!Tool::MergePdf.applies_to(&[Pdf], none));
+        assert!(Tool::ImagesToPdf.applies_to(&[Png, Jpeg], none));
+        assert!(!Tool::ImagesToPdf.applies_to(&[Png, Heic], none));
+        assert!(!Tool::Collage.applies_to(&[Png], none));
+        assert!(Tool::Sha256.applies_to(&[Mp4], none));
+        assert!(!Tool::Media(MediaTool::Mute).applies_to(&[Mp4], none));
+        assert!(Tool::Media(MediaTool::Mute).applies_to(&[Mp4], Available::ALL));
+        assert!(!Tool::Media(MediaTool::Mute).applies_to(&[Mp3], Available::ALL));
     }
 }

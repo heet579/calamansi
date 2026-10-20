@@ -50,7 +50,10 @@ pub fn set_enabled(on: bool) {
 /// Install on the UI thread, which must run a message loop.
 pub fn install(target: HWND) -> bool {
     TARGET.store(target, Ordering::SeqCst);
-    let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(proc), null_mut(), 0) };
+    // Some Windows versions reject a null module handle for global hooks.
+    let module =
+        unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null()) };
+    let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(proc), module, 0) };
     HOOK.store(hook, Ordering::SeqCst);
     !hook.is_null()
 }

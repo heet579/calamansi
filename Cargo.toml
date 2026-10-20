@@ -8,12 +8,14 @@ edition = "2021"
 license = "GPL-3.0-only"
 repository = "https://github.com/heetpatel/calamansi"
 authors = ["Heet Patel and Calamansi contributors"]
-rust-version = "1.80"
+rust-version = "1.92"
 
 [workspace.dependencies]
 calamansi-core = { path = "crates/calamansi-core" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff", "webp", "gif", "ico"] }
 lopdf = "0.45"
+hayro = "0.8"
+zip = { version = "9", default-features = false, features = ["deflate"] }
 sha2 = "0.11"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

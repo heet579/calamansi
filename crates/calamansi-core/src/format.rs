@@ -22,6 +22,17 @@ pub enum Format {
     // Documents
     Pdf,
     Txt,
+    // Office documents
+    Docx,
+    Doc,
+    Odt,
+    Rtf,
+    Xlsx,
+    Xls,
+    Ods,
+    Pptx,
+    Ppt,
+    Odp,
     // Subtitles
     Srt,
     Vtt,
@@ -47,6 +58,16 @@ pub enum Kind {
     Subtitle,
     Video,
     Audio,
+    /// Word-processor, spreadsheet and presentation files.
+    Office,
+}
+
+/// Which Office application family a document belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OfficeFamily {
+    Text,
+    Sheet,
+    Slides,
 }
 
 impl Format {
@@ -62,6 +83,16 @@ impl Format {
         Format::Ico,
         Format::Pdf,
         Format::Txt,
+        Format::Docx,
+        Format::Doc,
+        Format::Odt,
+        Format::Rtf,
+        Format::Xlsx,
+        Format::Xls,
+        Format::Ods,
+        Format::Pptx,
+        Format::Ppt,
+        Format::Odp,
         Format::Srt,
         Format::Vtt,
         Format::Mp4,
@@ -91,6 +122,16 @@ impl Format {
             Format::Ico => "ico",
             Format::Pdf => "pdf",
             Format::Txt => "txt",
+            Format::Docx => "docx",
+            Format::Doc => "doc",
+            Format::Odt => "odt",
+            Format::Rtf => "rtf",
+            Format::Xlsx => "xlsx",
+            Format::Xls => "xls",
+            Format::Ods => "ods",
+            Format::Pptx => "pptx",
+            Format::Ppt => "ppt",
+            Format::Odp => "odp",
             Format::Srt => "srt",
             Format::Vtt => "vtt",
             Format::Mp4 => "mp4",
@@ -121,6 +162,16 @@ impl Format {
             Format::Ico => "ICO",
             Format::Pdf => "PDF",
             Format::Txt => "Text",
+            Format::Docx => "Word",
+            Format::Doc => "DOC",
+            Format::Odt => "ODT",
+            Format::Rtf => "RTF",
+            Format::Xlsx => "Excel",
+            Format::Xls => "XLS",
+            Format::Ods => "ODS",
+            Format::Pptx => "PowerPoint",
+            Format::Ppt => "PPT",
+            Format::Odp => "ODP",
             Format::Srt => "SRT",
             Format::Vtt => "VTT",
             Format::Mp4 => "MP4",
@@ -145,6 +196,17 @@ impl Format {
             Srt | Vtt => Kind::Subtitle,
             Mp4 | Mov | Mkv | Webm | Avi => Kind::Video,
             Mp3 | Wav | M4a | Aac | Flac | Ogg => Kind::Audio,
+            Docx | Doc | Odt | Rtf | Xlsx | Xls | Ods | Pptx | Ppt | Odp => Kind::Office,
+        }
+    }
+
+    pub fn office_family(self) -> Option<OfficeFamily> {
+        use Format::*;
+        match self {
+            Docx | Doc | Odt | Rtf => Some(OfficeFamily::Text),
+            Xlsx | Xls | Ods => Some(OfficeFamily::Sheet),
+            Pptx | Ppt | Odp => Some(OfficeFamily::Slides),
+            _ => None,
         }
     }
 
@@ -162,7 +224,17 @@ impl Format {
             "tif" | "tiff" => Format::Tiff,
             "ico" => Format::Ico,
             "pdf" => Format::Pdf,
-            "txt" | "text" | "md" | "log" => Format::Txt,
+            "txt" | "text" | "md" | "log" | "csv" => Format::Txt,
+            "docx" | "docm" | "word" => Format::Docx,
+            "doc" => Format::Doc,
+            "odt" => Format::Odt,
+            "rtf" => Format::Rtf,
+            "xlsx" | "xlsm" | "excel" => Format::Xlsx,
+            "xls" => Format::Xls,
+            "ods" => Format::Ods,
+            "pptx" | "pptm" | "powerpoint" => Format::Pptx,
+            "ppt" => Format::Ppt,
+            "odp" => Format::Odp,
             "srt" => Format::Srt,
             "vtt" | "webvtt" => Format::Vtt,
             "mp4" | "m4v" => Format::Mp4,
@@ -230,8 +302,17 @@ pub fn detect_bytes(b: &[u8]) -> Option<Format> {
             _ => {}
         }
     }
-    if b.starts_with(b"BM") && b.len() >= 14 {
+    // "BM" alone is too common at the start of text files; also check the
+    // DIB header size that follows the 14-byte file header.
+    if b.starts_with(b"BM")
+        && b.len() >= 18
+        && matches!(b[14], 12 | 40 | 52 | 56 | 64 | 108 | 124)
+        && b[15..18] == [0, 0, 0]
+    {
         return Some(Format::Bmp);
+    }
+    if b.starts_with(b"{\\rtf") {
+        return Some(Format::Rtf);
     }
     if b.starts_with(&[0, 0, 1, 0]) && b.len() >= 6 {
         return Some(Format::Ico);
@@ -278,7 +359,8 @@ mod tests {
         assert_eq!(Format::parse("JPG"), Some(Format::Jpeg));
         assert_eq!(Format::parse(".tif"), Some(Format::Tiff));
         assert_eq!(Format::parse("heif"), Some(Format::Heic));
-        assert_eq!(Format::parse("docx"), None);
+        assert_eq!(Format::parse("docx"), Some(Format::Docx));
+        assert_eq!(Format::parse("pages"), None);
     }
 
     #[test]
@@ -306,6 +388,12 @@ mod tests {
         );
         assert_eq!(detect_bytes(b"%PDF-1.7"), Some(Format::Pdf));
         assert_eq!(detect_bytes(b"hello"), None);
+        assert_eq!(
+            detect_bytes(b"BMW owners club notes"),
+            None,
+            "text starting with BM"
+        );
+        assert_eq!(detect_bytes(b"{\\rtf1\\ansi"), Some(Format::Rtf));
     }
 
     #[test]

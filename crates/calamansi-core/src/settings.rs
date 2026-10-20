@@ -47,6 +47,11 @@ pub struct Settings {
     pub excluded_apps: Vec<String>,
     /// Explicit FFmpeg location; otherwise common install paths are searched.
     pub ffmpeg_path: Option<PathBuf>,
+    /// Explicit LibreOffice `soffice` location; otherwise Microsoft Office or
+    /// LibreOffice is found automatically.
+    pub office_path: Option<PathBuf>,
+    /// Resolution for PDF pages turned into images.
+    pub pdf_image_dpi: u32,
     /// How long a successful result stays on screen.
     pub success_dismiss_ms: u32,
     /// Maximum minutes an FFmpeg job may run before it's stopped.
@@ -62,6 +67,8 @@ impl Default for Settings {
             drag_wheel: true,
             excluded_apps: Vec::new(),
             ffmpeg_path: None,
+            office_path: None,
+            pdf_image_dpi: 150,
             success_dismiss_ms: 2000,
             ffmpeg_timeout_minutes: 60,
         }
@@ -98,6 +105,7 @@ impl Settings {
         self.quality = self.quality.clamp(1, 100);
         self.resize_max_side = self.resize_max_side.clamp(16, 16_384);
         self.ffmpeg_timeout_minutes = self.ffmpeg_timeout_minutes.clamp(1, 24 * 60);
+        self.pdf_image_dpi = self.pdf_image_dpi.clamp(36, 600);
         self
     }
 
