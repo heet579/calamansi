@@ -22,7 +22,18 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist | Out-Null
-          Copy-Item target/release/Calamansi.exe, target/release/calamansi-cli.exe, LICENSE, README.md dist/
+          Copy-Item target/release/Calamansi.exe, target/release/calamansi-cli.exe, LICENSE, THIRD_PARTY_NOTICES.md dist/
+          Copy-Item "docs/START-HERE.txt" "dist/START HERE.txt"
+          # Fail the release if the exe still needs the Visual C++ runtime DLLs.
+          $dumpbin = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like '*Hostx64\x64*' } | Select-Object -First 1
+          if ($dumpbin) {
+            $deps = (& $dumpbin.FullName /dependents dist/Calamansi.exe) -join "`n"
+            if ($deps -match 'VCRUNTIME|MSVCP') { throw "Calamansi.exe depends on the VC++ runtime:`n$deps" }
+            Write-Host $deps
+          } else {
+            Write-Warning "dumpbin not found; skipped the runtime dependency check"
+          }
       - id: upload
         uses: actions/upload-artifact@v4
         with:

@@ -1,0 +1,36 @@
+CALAMANSI - local file converter for Windows
+============================================
+
+No installation needed. Nothing is downloaded. Your files never leave your PC.
+
+1. Move this folder somewhere permanent, for example:
+     C:\Users\<you>\AppData\Local\Programs\Calamansi
+2. Double-click Calamansi.exe. A green slice icon appears in the system tray
+   (click the ^ arrow next to the clock if you can't see it).
+3. Select files in File Explorer, start dragging, and hold SHIFT.
+   A wheel appears under your mouse. Drop the files on the format you want.
+     SHIFT + drag          convert (PDF, JPEG, PNG, Word, ...)
+     CTRL + SHIFT + drag   tools (merge PDFs, resize, compress, rotate, ...)
+   New files appear next to the originals. Originals are never changed.
+
+Right-click the tray icon for more:
+  - Run self-test        checks that every conversion works on this PC
+  - Start with Windows
+  - Show in "Send to" menu   (right-click files > Send to > Calamansi)
+
+Optional extras (Calamansi uses them if they are installed):
+  - Audio & video:          winget install ffmpeg
+  - Word/Excel/PowerPoint:  Microsoft Office, or
+                            winget install TheDocumentFoundation.LibreOffice
+
+Windows may show "Windows protected your PC" because this early version is
+not code-signed yet. Click "More info" > "Run anyway" only if you downloaded
+it from the project's GitHub Releases page.
+
+Do not run Calamansi as administrator: Windows then blocks drag-and-drop.
+
+calamansi-cli.exe is the same converter for the command line:
+  calamansi-cli.exe convert --to pdf photo.jpg
+  calamansi-cli.exe tool --list
+
+Free and open source under the GNU GPL v3 (see LICENSE).

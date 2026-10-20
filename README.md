@@ -51,12 +51,30 @@ winget install TheDocumentFoundation.LibreOffice   # only if you don't have Micr
 
 ## Install
 
-Download the latest zip from [Releases](../../releases), unzip anywhere (for example
-`%LOCALAPPDATA%\Programs\Calamansi`) and run `Calamansi.exe`. Use the tray menu to start it with
-Windows and to add it to the **Send to** menu.
+No installer, no Rust, nothing else to download:
+
+1. Download `Calamansi-…-windows-x64.zip` from [Releases](../../releases) and unzip it somewhere
+   permanent (for example `%LOCALAPPDATA%\Programs\Calamansi`).
+2. Run `Calamansi.exe`. It lives in the system tray.
+3. Shift-drag some files. Right-click the tray icon → **Run self-test** to check every conversion on
+   your PC.
+
+The zip contains a single self-contained `Calamansi.exe` (no Visual C++ runtime or other DLLs
+needed), `calamansi-cli.exe`, and `START HERE.txt`. FFmpeg (audio/video) and Microsoft Office or
+LibreOffice (Word/Excel/PowerPoint) are optional and used only if already installed.
 
 Early builds aren't code-signed yet, so SmartScreen may warn. Choose **More info → Run anyway** only if
 you downloaded the zip from this repository's Releases page and its SHA-256 matches `SHA256SUMS.txt`.
+
+## Publishing a release (maintainers)
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions tests the code, builds the self-contained executables and attaches the zip to a new
+release about ten minutes later.
 
 ## Build from source
 
